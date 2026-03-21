@@ -2,67 +2,156 @@ IRIS PIPELINE PROMPTS v9 (FINAL)
 
 
 ================================================================================
+IMAGE_FORMAT: UNWRAPPED_IRIS_STRIP (IMPORTANT — READ BEFORE ALL STEPS)
+================================================================================
+
+CRITICAL NOTICE:
+The image provided to ALL pipeline steps is NOT a raw circular iris photograph.
+It is an UNWRAPPED (unrolled/linearized) iris strip produced by a polar-to-rectangular
+transformation of the circular iris. The circular ring of the iris has been "straightened"
+into a horizontal rectangle.
+
+STRIP LAYOUT (pixel dimensions):
+- Full canvas: ~1280 × 390 px (includes labeled margins)
+- Iris content region: ~1200 × 300 px (inside left/top margins)
+- Left margin (~60 px): ring labels R0, R1, ..., R11 printed at each ring boundary
+- Top margin (~50 px): minute tick marks labeled 0, 5, 10, 15, ..., 60 (every 5 min)
+- Bottom area: eye side label ("RIGHT EYE" / "LEFT EYE"), "^ NASAL", "^ TEMPORAL"
+
+COORDINATE MAPPING — HOW TO READ LOCATION IN THE RECTANGULAR IMAGE:
+
+X AXIS (horizontal, left → right) = ANGULAR POSITION IN MINUTES:
+  - Left edge of iris strip  → minute  0  (= 12 o'clock position, top of circle)
+  - Quarter of strip width   → minute 15  (= 3 o'clock)
+  - Half of strip width      → minute 30  (= 6 o'clock, bottom of circle)
+  - Three-quarter of width   → minute 45  (= 9 o'clock)
+  - Right edge of strip      → minute 60  (= 12 o'clock again, same as minute 0)
+  Formula: minute = (x_pixel - left_margin) / strip_width * 60
+  Direction: clockwise from 12 o'clock.
+  Use the printed minute tick labels at the top of the image to read the minute directly.
+
+Y AXIS (vertical, top → bottom) = RADIAL DEPTH IN RINGS:
+  - Top of iris strip    → Ring 0  (innermost — adjacent to pupil edge)
+  - Bottom of iris strip → Ring 11 (outermost — adjacent to iris/limbus edge)
+  Formula: ring = (y_pixel - top_margin) / strip_height * 12
+  Use the printed R0–R11 labels on the left margin to read the ring directly.
+
+NASAL / TEMPORAL ORIENTATION (visible at bottom of image):
+  RIGHT EYE: "^ TEMPORAL" ≈ minute 15 (3 o'clock), "^ NASAL" ≈ minute 45 (9 o'clock)
+  LEFT  EYE: "^ NASAL"    ≈ minute 15 (3 o'clock), "^ TEMPORAL" ≈ minute 45 (9 o'clock)
+
+RING GROUP ZONES (reference) with approximate vertical positions in the 300 px strip:
+  R0        → IPB  (iris pupillary border)  — top  0– 25 px of strip
+  R1        → STOM (stomach ring)           — top 25– 50 px
+  R2–R3     → ANW  (autonomic nerve wreath) — top 50–100 px  (~upper 1/6 of strip)
+  R4–R9     → ORG  (organ zone)            — top 100–250 px  (~middle 1/2 of strip)
+  R10       → LYM  (lymphatic zone)        — top 250–275 px
+  R11       → SCU  (scurf rim / skin zone) — top 275–300 px  (~bottom 1/12 of strip)
+
+HOW CIRCULAR FEATURES APPEAR IN THE RECTANGULAR STRIP:
+
+  CONCENTRIC features (rings, rosary arcs, color bands, ANW/collarette wave):
+    In the original circular iris these run around the center.
+    In the strip → they appear as HORIZONTAL stripes or wavy bands
+    running LEFT-TO-RIGHT across the strip, parallel to the top/bottom edges.
+    Examples: nerve_rings, lymphatic_rosary, scurf_rim, sodium_ring, pigment_band, ANW.
+
+  RADIAL features (furrows and clefts running from pupil outward toward limbus):
+    In the original circular iris these radiate from the center outward.
+    In the strip → they appear as VERTICAL dark stripes running TOP-TO-BOTTOM
+    (from the upper rows toward the lower rows of the strip).
+    Examples: radial_furrow, deep_radial_cleft.
+
+  POINT / LOCAL features (lacunae, crypts, pigment spots, small patches):
+    In the strip → they appear as discrete patches or spots.
+    Lacunae may appear WIDER than tall (horizontally elongated) due to angular
+    stretching, especially near the 12 o'clock region (left and right strip edges)
+    and 6 o'clock (strip center, minute 30). Away from those poles the shape is more oval.
+    Crypts remain narrow and nearly square or triangular.
+
+  DIAGONAL / CROSSING features (transversal fibers):
+    In the strip → they appear as lines running at a DIAGONAL ANGLE across
+    the strip, cutting across the general vertical direction of radial fibers.
+
+  EYELID-MASKED areas (white/blank):
+    Upper eyelid → continuous white band near BOTH the left edge (minutes 0–10)
+    AND the right edge (minutes 50–60); both represent the same 12 o'clock region.
+    Lower eyelid → white band near the horizontal center (minutes 25–35, 6 o'clock).
+    These white bands span the FULL HEIGHT of the strip (R0 through R11).
+
+WHITE/BLANK BANDS in the strip = areas masked by eyelids (pre-processed before unrolling).
+These correspond to the upper and lower eyelid occlusion zones in the original circular image.
+The upper eyelid typically masks a horizontal band appearing at both the left edge (minutes 0–10)
+and the right edge (minutes 50–60) of the strip — these two edges represent the same angular
+region (12 o'clock), because the strip starts and ends at 12 o'clock.
+The lower eyelid typically masks a band near minutes 25–35 (around 6 o'clock).
+
+CRITICAL — DO NOT:
+  - Attempt to detect a limbus ellipse or pupil circle in this image.
+  - Apply atan2 or any circular-geometry formula to locate findings.
+  - Compute radial distances from a center point.
+  Instead: READ minute from X position using top tick labels, READ ring from Y position
+  using left R-labels. This is the ONLY correct localization method for unwrapped strips.
+
+
+================================================================================
 STEP1_geo_calibration
 ================================================================================
 
 ROLE: iris_geo_calibrator_v9
 MODE: image_parse_only
-INPUT: single_iris_image
+INPUT: unwrapped_iris_strip   # rectangular image — see IMAGE_FORMAT section above
 SIDE: {{side}}   # "R" or "L"
 IMG_ID: {{imageHash}}
 
 GOAL:
-- Decide if image is usable for iris analysis.
-- Establish v9 coordinates:
-  - minutes 0..59: 12:00=0, 3:00=15, 6:00=30, 9:00=45 (clockwise)
-  - 12 rings 0..11 along PUPIL_EDGE -> IRIS_EDGE
-  - ring width = 1/12 of reference thickness measured on minute=15 ray
+- Decide if the unwrapped strip is usable for iris analysis.
+- Confirm v9 coordinate grid as printed on the image:
+  - minutes 0..59: left-edge=0 (12 o'clock), quarter=15 (3 o'clock),
+    half=30 (6 o'clock), three-quarter=45 (9 o'clock) — clockwise
+  - 12 rings 0..11: top=R0 (inner/pupil side), bottom=R11 (outer/limbus side)
 
 IGNORE:
-sclera | pupil interior | eyelashes | eyelids | makeup | glare | reflections
+White/blank bands (eyelid-masked regions) | glare/specular patches | areas outside the iris strip margins
 
-AXIS (CRITICAL):
-- Do NOT use upper eyelid as reference.
-- Detect limbus ellipse:
-  - irisCenter = center of limbus ellipse
-  - limbus_left = leftmost visible limbus point
-  - limbus_right = rightmost visible limbus point
-- Define:
-  - ex = normalize(limbus_right - irisCenter)  # 3:00 direction
-  - ey = perpendicular(ex) chosen toward image-up  # 12:00 direction
+COORDINATE READING (CRITICAL — UNWRAPPED STRIP):
+- DO NOT detect limbus ellipse, pupil circle, or apply any circular geometry.
+- DO NOT use atan2 or radial distance formulas.
+- Minute (angular position): read directly from the X position of a feature using the
+  minute tick labels printed at the top of the image.
+  - Each tick interval = 5 minutes; interpolate for positions between ticks.
+- Ring (radial depth): read directly from the Y position using the R0–R11 labels
+  printed in the left margin.
+  - Each row between two ring lines = one ring; the top row is R0.
+- Reference for quarter-positions:
+  - ~1/4 of strip width from left ≈ minute 15 (3 o'clock)
+  - ~1/2 of strip width ≈ minute 30 (6 o'clock)
+  - ~3/4 of strip width ≈ minute 45 (9 o'clock)
 
-ANGLE -> MINUTE:
-- For point p: v = normalize(p - irisCenter)
-- angleDeg = ( atan2( dot(v, ex), dot(v, ey) ) * 180/pi ) mod 360
-- minute = round(angleDeg / 6) mod 60
+SPECULAR / GLARE HANDLING:
+- Detect bright white or washed-out patches in the iris strip that lack texture.
+- Locate their minute and ring range by reading the grid axes.
+- Mark as invalidRegions with their minuteRange/ringRange.
 
-RINGS (YOUR RULE):
-- Reference thickness MUST be measured on minute=15 ray (3:00):
-  - rP15 = distance irisCenter -> pupil_edge along ex
-  - rI15 = distance irisCenter -> iris_edge along ex
-  - Lref = rI15 - rP15   (must be >0 and reliable)
-- For any point at direction v:
-  - rP(theta) = distance irisCenter -> pupil_edge along v
-  - rX(theta) = distance irisCenter -> point along v
-  - d = rX(theta) - rP(theta)
-  - ring = clamp( floor( (d / Lref) * 12 ), 0, 11 )
-
-SPECULAR HANDLING:
-- Detect specular highlights: near-white saturated patches with no iris texture.
-- Mark invalidRegions with minuteRange/ringRange if possible.
-
-UPPER IRIS USABILITY:
-- Determine if upper iris around 12:00 is occluded by eyelid substantially.
-- If occluded: usableUpperIris=false.
+EYELID OCCLUSION (UPPER / LOWER):
+- Upper eyelid masking appears as a continuous white horizontal band near
+  minutes 0–10 (left edge of strip) and/or minutes 50–60 (right edge of strip).
+  Both edges represent the same 12 o'clock angular region of the original iris.
+- Lower eyelid masking appears as a white band near minutes 25–35 (around 6 o'clock).
+- If the white band at 12 o'clock (left and/or right strip edges) covers more than
+  ~1/3 of the strip height in that minute range: usableUpperIris=false.
 
 QUALITY GATE:
 Set ok=false if any:
-- focus="poor"
-- limbus edge unreliable OR pupil edge cannot be traced
-- >35% iris occluded
-- specular/glare covers large portion of ANW region
-- minute=15 reference ray is not usable (pupil edge or iris edge cannot be traced reliably on ex)
-- Lref cannot be computed reliably (<=0 or obstructed)
+- focus="poor" (iris texture is blurry or unrecognizable throughout the strip)
+- >35% of the strip area is white/blank (eyelid-masked or glare)
+- Specular/glare covers the majority of the ANW zone (rings 2–3) in the strip
+- The strip appears to be an invalid image (all white, all black, or not an iris strip)
+
+refRay15Usable:
+- In the unwrapped strip this means: is the minute-15 column (3 o'clock position —
+  temporal for RIGHT eye, nasal for LEFT eye) visible and free of white masking or glare?
+  Set to false if that vertical column is predominantly white/blank.
 
 OUTPUT_JSON ONLY:
 {
@@ -100,7 +189,7 @@ OUTPUT_JSON ONLY:
 
 FAILSAFE (if cannot comply):
 Return ONLY:
-{"error":{"stage":"STEP1","code":"FORMAT_FAIL|LOW_QUALITY|NO_LIMBUS|NO_PUPIL_EDGE|REF_RAY_15_NOT_USABLE","message":"short","canRetry":true}}
+{"error":{"stage":"STEP1","code":"FORMAT_FAIL|LOW_QUALITY|INVALID_STRIP|STRIP_MOSTLY_OCCLUDED","message":"<brief description of failure reason>","canRetry":true}}
 
 
 ================================================================================
@@ -109,7 +198,7 @@ STEP2A_structural_detector
 
 ROLE: iris_detector_struct_v9
 MODE: image_parse_only
-INPUT: single_iris_image
+INPUT: unwrapped_iris_strip   # rectangular image — see IMAGE_FORMAT section above
 SIDE: {{side}}
 GEO: {{step1_json}}
 
@@ -120,12 +209,19 @@ TARGET:
 IRIS_STRUCTURE_ONLY (NO meaning, NO diagnosis)
 
 IGNORE:
-sclera | pupil interior | lashes | eyelids | makeup | GEO.invalidRegions
+White/blank eyelid-masked bands | glare/specular patches | GEO.invalidRegions
 
-LOCALIZATION RULE:
+LOCALIZATION RULE (UNWRAPPED STRIP — CRITICAL):
+- To locate a finding: observe its position in the rectangular strip image.
+  - Minute: read from the X position using the minute tick labels printed at the TOP
+    of the image (0 at left edge = 12 o'clock, 60 at right edge = 12 o'clock again).
+    Interpolate between tick marks as needed.
+  - Ring: read from the Y position using the R0–R11 labels printed in the LEFT margin
+    (R0 at top = innermost/pupil side, R11 at bottom = outermost/limbus side).
 - Output minuteRange + ringRange ALWAYS.
 - Point-like findings: minuteRange must be at least ±1 minute.
 - Prefer ranges over fake precision.
+- DO NOT use atan2, radial distance, or any circular-geometry formula.
 
 RANGE NORMALIZATION (MANDATORY):
 - minuteRange must NEVER wrap (no [58,2]).
@@ -149,16 +245,37 @@ DETECT (STRUCTURAL):
 - transversal_fiber
 - structural_asymmetry
 
-DEFINITIONS (strict):
-- lacuna: oval/leaf gap; breaks fiber flow; not pure black; shallow->mid.
+DEFINITIONS (strict, with strip appearance):
+- lacuna: oval/leaf gap; breaks fiber flow; not pure black; shallow->mid rings.
+  IN STRIP → a horizontally elongated oval or lens-shaped darker region with a slightly
+  lighter interior relative to surrounding fiber texture; wider than tall, especially
+  at minutes 0–10, 50–60 (12 o'clock poles) and minute 30 (6 o'clock).
 - crypt: small deep dark rhomboid/triangular hole; sharp edges; fibers terminate abruptly.
-- giant_lacuna: very large lacuna dominating sector (>= ~8 minutes).
-- atrophic_area: locally absent/flattened fiber texture (NOT glare).
+  IN STRIP → a compact near-black slot or small triangle with abrupt sharp boundaries;
+  roughly as wide as tall or slightly taller than wide (narrow vertical slot).
+- giant_lacuna: very large lacuna dominating a full sector (>= ~8 minutes wide).
+  IN STRIP → a conspicuously large darker oval spanning at least 8 minute columns
+  (≈1/7 of the strip width); clearly wider than any single lacuna.
+- atrophic_area: locally absent/flattened fiber texture (NOT glare, NOT a white band).
+  IN STRIP → a region where the horizontal fiber striation pattern is absent or
+  greatly reduced but the area is NOT bright white; it has a dull, texture-less appearance.
 - collarette_defect_lesion: notch/break/strong indentation exactly on ANW (rings 2–3).
+  IN STRIP → a gap, indentation, or break within the upper horizontal band (rows R2–R3,
+  approximately 50–100 px from the top of the strip content area); the defect interrupts
+  the wavy horizontal contour of the collarette.
 - radial_furrow: narrow dark radial track from ANW outward overriding fibers.
+  IN STRIP → a narrow VERTICAL dark stripe running FROM TOP (ANW rows) DOWNWARD toward
+  lower rows; its width is 1–3 minute columns; darker than surrounding fiber texture.
 - deep_radial_cleft: wider/deeper radial channel than radial_furrow.
+  IN STRIP → a wider VERTICAL dark stripe (4–8 minute columns wide) running top-to-bottom;
+  distinctly darker and broader than a radial_furrow; may reach R0 or R11.
 - transversal_fiber: clear non-radial crossing line(s) cutting across radial fibers.
+  IN STRIP → a DIAGONAL line or narrow band crossing the strip at an angle clearly
+  different from vertical (not top-to-bottom); crosses several ring rows diagonally.
 - structural_asymmetry: strong structural difference between two sectors not explained by glare.
+  IN STRIP → a visible difference in fiber density, texture, or color between the left
+  portion of the strip (e.g., minutes 0–30) and the right portion (minutes 30–60),
+  or between clearly separated columns/sectors; not caused by white eyelid bands.
 
 OUTPUT_JSON ONLY:
 {
@@ -183,7 +300,7 @@ FAILSAFE:
 If GEO.ok != true:
 {"error":{"stage":"STEP2A","code":"PREREQ_FAIL","message":"geo not ok","canRetry":true}}
 If cannot comply:
-{"error":{"stage":"STEP2A","code":"FORMAT_FAIL","message":"short","canRetry":true}}
+{"error":{"stage":"STEP2A","code":"FORMAT_FAIL","message":"<brief description of failure reason>","canRetry":true}}
 
 
 ================================================================================
@@ -192,7 +309,7 @@ STEP2B_pigment_rings_detector
 
 ROLE: iris_detector_pigment_rings_v9
 MODE: image_parse_only
-INPUT: single_iris_image
+INPUT: unwrapped_iris_strip   # rectangular image — see IMAGE_FORMAT section above
 SIDE: {{side}}
 GEO: {{step1_json}}
 
@@ -203,11 +320,18 @@ TARGET:
 IRIS_STRUCTURE_ONLY (NO meaning, NO diagnosis)
 
 IGNORE:
-sclera | pupil interior | lashes | eyelids | makeup | GEO.invalidRegions
+White/blank eyelid-masked bands | glare/specular patches | GEO.invalidRegions
 
-LOCALIZATION RULE:
+LOCALIZATION RULE (UNWRAPPED STRIP — CRITICAL):
+- To locate a finding: observe its position in the rectangular strip image.
+  - Minute: read from the X position using the minute tick labels printed at the TOP
+    of the image (0 at left edge = 12 o'clock, 60 at right edge = 12 o'clock again).
+    Interpolate between tick marks as needed.
+  - Ring: read from the Y position using the R0–R11 labels printed in the LEFT margin
+    (R0 at top = innermost/pupil side, R11 at bottom = outermost/limbus side).
 - Always minuteRange + ringRange.
 - Point-like: minuteRange must be at least ±1 minute.
+- DO NOT use atan2, radial distance, or any circular-geometry formula.
 
 RANGE NORMALIZATION (MANDATORY):
 - minuteRange must NEVER wrap; split if needed.
@@ -232,22 +356,46 @@ DETECT (PIGMENT / PERIPHERY / RINGS):
 COLLARETTE (ANW) STATE:
 - ANW_status: expanded | contracted | broken | normal | unclear
 - collarette must always report ringRange intersecting [2,3].
+- IN STRIP: the ANW/collarette appears as a roughly horizontal, slightly wavy or
+  undulating band in the UPPER PORTION of the strip, spanning rows R2–R3
+  (approximately 50–100 px from the top edge of the iris content area).
+  An expanded ANW pushes that band downward; a contracted ANW sits higher.
+  A broken ANW shows clear gaps or missing sections in this horizontal band.
 
 GLOBAL TRIAD TAGS (for later meaning in manual):
 - constitution: LYM | HEM | BIL | unclear
 - disposition: SILK | LINEN | BURLAP | unclear
 - diathesis_tags (only if visibly supported): HAC | LRS | LIP | DYS
 
-DEFINITIONS (strict):
+DEFINITIONS (strict, with strip appearance):
 - pigment_spot: bounded colored spot on fibers (NO structural gap).
   subtype: orange_rust | brown_black | yellow | other
+  IN STRIP → a small colored dot or smudge; may be slightly elongated horizontally
+  near the 12 o'clock poles (left/right edges) but remains compact elsewhere.
 - pigment_cloud: diffuse haze field with soft edges.
-- pigment_band: belt/arc of color following concentric direction.
-- brushfield_like_spots: many tiny light specks near periphery; not continuous band.
-- nerve_rings: concentric stress arcs/rings (texture/structural arcs, not just color).
-- lymphatic_rosary: chain/arc of pale nodules near outer zone (discrete).
-- scurf_rim: dark peripheral rim (ring 11).
-- sodium_ring: pale/milky peripheral ring/band (NOT dark), may obscure detail.
+  IN STRIP → a soft-edged, diffusely colored area with no sharp boundary; covers
+  multiple minute columns and ring rows in a gradual fade.
+- pigment_band: belt/arc of color following the concentric direction around the iris.
+  IN STRIP → a HORIZONTAL colored stripe running LEFT-TO-RIGHT across the strip,
+  confined to a specific ring row or spanning 1–2 rows; similar to nerve_rings but
+  defined by color rather than structural arcs.
+- brushfield_like_spots: many tiny light specks near periphery; not a continuous band.
+  IN STRIP → scattered pale or bright tiny dots concentrated in the LOWER ROWS
+  (approximately R9–R11, bottom ~75 px of the strip); they do not merge into a band.
+- nerve_rings: concentric stress arcs/rings (structural arcs, not just color).
+  IN STRIP → one or more HORIZONTAL arc(s) or bands running LEFT-TO-RIGHT across
+  the full strip width, parallel to the top/bottom edges; they appear as subtle
+  darker or lighter horizontal lines within the fiber texture.
+- lymphatic_rosary: chain/arc of pale nodules near the outer zone (discrete).
+  IN STRIP → a HORIZONTAL chain of discrete rounded pale or light nodules in the
+  R10 row area (approximately 250–275 px from the top of the strip); the nodules
+  appear as individual beads separated by small gaps, not a continuous band.
+- scurf_rim: dark peripheral rim at ring 11 (outermost).
+  IN STRIP → a dark HORIZONTAL band running along the BOTTOM EDGE of the strip
+  (the R11 row, approximately the lowest 25 px of the iris content area).
+- sodium_ring: pale/milky peripheral ring/band (NOT dark), may obscure iris detail.
+  IN STRIP → a pale, milky, or whitish HORIZONTAL band near the BOTTOM ROWS (R9–R11,
+  approximately the lowest 75 px of the strip); lighter than surrounding iris texture.
 
 OUTPUT_JSON ONLY:
 {
@@ -282,7 +430,7 @@ FAILSAFE:
 If GEO.ok != true:
 {"error":{"stage":"STEP2B","code":"PREREQ_FAIL","message":"geo not ok","canRetry":true}}
 If cannot comply:
-{"error":{"stage":"STEP2B","code":"FORMAT_FAIL","message":"short","canRetry":true}}
+{"error":{"stage":"STEP2B","code":"FORMAT_FAIL","message":"<brief description of failure reason>","canRetry":true}}
 
 
 ================================================================================
@@ -369,7 +517,7 @@ OUTPUT_JSON ONLY:
 }
 
 FAILSAFE:
-{"error":{"stage":"STEP2C","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+{"error":{"stage":"STEP2C","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<brief description of failure reason>","canRetry":true}}
 
 
 ================================================================================
@@ -429,7 +577,7 @@ OUTPUT_JSON ONLY:
 }
 
 FAILSAFE:
-{"error":{"stage":"STEP3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+{"error":{"stage":"STEP3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<brief description of failure reason>","canRetry":true}}
 
 
 ================================================================================
@@ -493,7 +641,7 @@ OUTPUT_JSON ONLY:
 }
 
 FAILSAFE:
-{"error":{"stage":"STEP4","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+{"error":{"stage":"STEP4","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<brief description of failure reason>","canRetry":true}}
 
 
 ================================================================================
@@ -552,6 +700,32 @@ OUTPUT CONSTRAINTS:
 - severity enum: low|medium|high
 - angle винаги 0..360 (без wrap)
 
+MINUTE-TO-ZONE CONVERSION (CRITICAL — use this to map findings to UI zones):
+Findings carry minuteRange (0–59, strip X-axis). UI zones use degrees (0–360).
+Conversion formula: degrees = minute × 6.
+
+  Zone  1 ("12-1ч"): minutes  0– 5  → degrees   0°– 30°   (12:00–1:00)
+  Zone  2 ("1-2ч"):  minutes  5–10  → degrees  30°– 60°   (1:00–2:00)
+  Zone  3 ("2-3ч"):  minutes 10–15  → degrees  60°– 90°   (2:00–3:00)
+  Zone  4 ("3-4ч"):  minutes 15–20  → degrees  90°–120°   (3:00–4:00)
+  Zone  5 ("4-5ч"):  minutes 20–25  → degrees 120°–150°   (4:00–5:00)
+  Zone  6 ("5-6ч"):  minutes 25–30  → degrees 150°–180°   (5:00–6:00)
+  Zone  7 ("6-7ч"):  minutes 30–35  → degrees 180°–210°   (6:00–7:00)
+  Zone  8 ("7-8ч"):  minutes 35–40  → degrees 210°–240°   (7:00–8:00)
+  Zone  9 ("8-9ч"):  minutes 40–45  → degrees 240°–270°   (8:00–9:00)
+  Zone 10 ("9-10ч"): minutes 45–50  → degrees 270°–300°   (9:00–10:00)
+  Zone 11 ("10-11ч"):minutes 50–55  → degrees 300°–330°   (10:00–11:00)
+  Zone 12 ("11-12ч"):minutes 55–60  → degrees 330°–360°   (11:00–12:00)
+
+NOTE: minutes 0 and 60 both equal 12 o'clock (same angular position). Findings
+spanning the edge (e.g., minuteRange [57,3]) should be split and assigned to Zone 12
+([57,59] → Zone 12) and Zone 1 ([0,3] → Zone 1).
+
+ARTIFACTS location field: convert minuteRange to clock format using 5-min=1-hour mapping:
+  minute 0=12:00, 5=1:00, 10=2:00, 15=3:00, 20=4:00, 25=5:00, 30=6:00,
+  35=7:00, 40=8:00, 45=9:00, 50=10:00, 55=11:00, 60=12:00.
+  Example: minuteRange [15,20] → "3:00-4:00".
+
 FIXED 12 UI ZONES (always present):
 1:[0,30]   2:[30,60]  3:[60,90]  4:[90,120]  5:[120,150]  6:[150,180]
 7:[180,210] 8:[210,240] 9:[240,270] 10:[270,300] 11:[300,330] 12:[330,360]
@@ -561,7 +735,9 @@ ZONE NAMES (stable Bulgarian):
 7 "6-7ч" 8 "7-8ч" 9 "8-9ч" 10 "9-10ч" 11 "10-11ч" 12 "11-12ч"
 
 HOW TO FILL EACH FIXED ZONE:
-- Collect mapped findings whose center minute falls into that bucket.
+- Collect mapped findings whose center minute (= mean of minuteRange) falls in the zone's
+  minute range (use the MINUTE-TO-ZONE CONVERSION table above).
+- Convert center minute to degrees (minute × 6) to confirm which angle range it falls in.
 - Determine dominant v9 organ/system by evidence:
   - weight = confidence + structural_severity_bonus(lacuna/crypt/atrophic/cleft)
 - organ: кратко от organ_bg (или "орган1; орган2" ако трябва)
@@ -574,8 +750,8 @@ HOW TO FILL EACH FIXED ZONE:
 ARTIFACTS (2–5):
 - Pick strongest validated findings from CLEAN+MAPPED:
   lacuna/crypt/radial_furrow/deep_radial_cleft/nerve_rings/pigment_spot/sodium_ring/scurf_rim/lymphatic_rosary
-- location: convert minuteRange to hour-range "3:00-4:00" (5-min buckets)
-- description: кратко <=60, корелирано при възможност
+- location: use MINUTE-TO-ZONE CONVERSION clock format (e.g., minuteRange [15,20] → "3:00-4:00")
+- description: кратко <=60 chars, корелирано при възможност
 
 SYSTEM SCORES (always 6):
 - Храносмилателна, Имунна, Нервна, Сърдечно-съдова, Детоксикация, Ендокринна
@@ -628,4 +804,4 @@ OUTPUT_JSON ONLY:
 }
 
 FAILSAFE:
-{"error":{"stage":"STEP5","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+{"error":{"stage":"STEP5","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<brief description of failure reason>","canRetry":true}}
