@@ -1,0 +1,17 @@
+# Runtime configuration (contains secrets – do not commit)
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node / Wrangler
+node_modules/
+.wrangler/
+
+# OS
+.DS_Store
+Thumbs.db

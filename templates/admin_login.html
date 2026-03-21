@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+    <meta charset="UTF-8">
+    <title>Iris Admin – Вход</title>
+    <style>
+        body { background: #1a1a1a; color: #ddd; font-family: sans-serif; margin: 0;
+               display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .login-box { background: #222; border: 1px solid #444; border-radius: 8px;
+                     padding: 40px; width: 320px; }
+        .logo { text-align: center; font-size: 2.5rem; margin-bottom: 8px; }
+        h1 { color: #fff; text-align: center; margin: 0 0 28px; font-size: 1.3rem; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 6px; color: #aaa; font-size: 0.9rem; }
+        input[type="password"] { width: 100%; padding: 10px; background: #333;
+            border: 1px solid #555; color: #ddd; border-radius: 4px;
+            box-sizing: border-box; font-size: 1rem; }
+        input[type="password"]:focus { outline: none; border-color: #007bff; }
+        .btn { width: 100%; padding: 12px; background: #007bff; color: #fff;
+               border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        .btn:hover { background: #0056b3; }
+        .error { color: #ff6b6b; background: #3a1a1a; border: 1px solid #ff6b6b;
+                 padding: 10px; border-radius: 4px; margin-bottom: 18px;
+                 text-align: center; font-size: 0.9rem; }
+        .hint { color: #666; font-size: 0.78rem; text-align: center; margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <div class="logo">👁️</div>
+        <h1>Iris Admin Panel</h1>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="/admin/login">
+            <div class="form-group">
+                <label for="password">Парола:</label>
+                <input type="password" id="password" name="password"
+                       placeholder="Въведете парола" required autofocus>
+            </div>
+            <button type="submit" class="btn">ВХОД</button>
+        </form>
+        <div class="hint">Забравена парола? Нулирайте <code>config.json</code> на сървъра.</div>
+    </div>
+</body>
+</html>

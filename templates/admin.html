@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+    <meta charset="UTF-8">
+    <title>Iris Admin Panel</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { background: #1a1a1a; color: #ddd; font-family: sans-serif; margin: 0; }
+        .navbar { background: #111; border-bottom: 1px solid #444; padding: 14px 30px;
+                  display: flex; justify-content: space-between; align-items: center; }
+        .navbar-brand { font-size: 1.15rem; color: #fff; font-weight: bold; }
+        .navbar-brand span { color: #007bff; }
+        .nav-links a { color: #aaa; text-decoration: none; margin-left: 20px; font-size: 0.9rem; }
+        .nav-links a:hover { color: #fff; }
+        .container { max-width: 860px; margin: 40px auto; padding: 0 20px; }
+        .card { background: #222; border: 1px solid #444; border-radius: 8px;
+                padding: 28px; margin-bottom: 28px; }
+        .card h2 { color: #fff; margin: 0 0 20px; border-bottom: 1px solid #444;
+                   padding-bottom: 12px; font-size: 1.05rem; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 6px; color: #aaa; font-size: 0.88rem; }
+        .hint { font-size: 0.78rem; color: #666; margin-top: 5px; line-height: 1.5; }
+        input[type="text"], input[type="password"], input[type="url"] {
+            width: 100%; padding: 10px; background: #333; border: 1px solid #555;
+            color: #ddd; border-radius: 4px; font-size: 0.95rem; }
+        input:focus { outline: none; border-color: #007bff; }
+        .btn { padding: 10px 22px; background: #007bff; color: #fff; border: none;
+               border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
+        .btn:hover { background: #0056b3; }
+        .btn-secondary { background: #555; }
+        .btn-secondary:hover { background: #666; }
+        .alert { padding: 12px 16px; border-radius: 4px; margin-bottom: 24px; font-size: 0.9rem; }
+        .alert-success { background: #1a3a1a; border: 1px solid #28a745; color: #5cb85c; }
+        .alert-error   { background: #3a1a1a; border: 1px solid #dc3545; color: #ff6b6b; }
+        .alert-warn    { background: #3a3010; border: 1px solid #ffc107; color: #ffc107; }
+        pre { background: #111; padding: 16px; border-radius: 4px; color: #0f0;
+              font-size: 0.82rem; overflow-x: auto; line-height: 1.6; margin: 0; }
+        #test-result { display: inline-block; margin-left: 12px; font-size: 0.85rem; vertical-align: middle; }
+        .row { display: flex; gap: 16px; }
+        .row .form-group { flex: 1; }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-brand">👁️&nbsp; Iris <span>Admin</span></div>
+        <div class="nav-links">
+            <a href="/">← Към приложението</a>
+            <a href="/admin/logout">Изход</a>
+        </div>
+    </nav>
+
+    <div class="container">
+
+        {% if error %}
+        <div class="alert alert-error">❌ {{ error }}</div>
+        {% endif %}
+        {% if success %}
+        <div class="alert alert-success">✅ {{ success }}</div>
+        {% endif %}
+
+        <div class="alert alert-warn">
+            ⚠️ Сменете паролата по подразбиране незабавно от секцията по-долу.
+        </div>
+
+        <form method="POST" action="/admin/settings">
+
+            <!-- ── Worker URL ── -->
+            <div class="card">
+                <h2>⚙️ Cloudflare Worker – URL</h2>
+                <div class="form-group">
+                    <label for="worker_url">URL на деплойнатия Worker:</label>
+                    <input type="url" id="worker_url" name="worker_url"
+                           value="{{ worker_url }}"
+                           placeholder="https://iris-analyzer.&lt;your-subdomain&gt;.workers.dev">
+                    <div class="hint">
+                        Поставете URL-адреса, получен след <code>wrangler deploy</code>.
+                        Оставете празно ако Worker-ът не е деплойнат.
+                    </div>
+                </div>
+                <button type="button" class="btn btn-secondary" onclick="testWorker()">
+                    🔗 Тест на връзката
+                </button>
+                <span id="test-result"></span>
+            </div>
+
+            <!-- ── Password change ── -->
+            <div class="card">
+                <h2>🔒 Смяна на парола</h2>
+                <div class="form-group">
+                    <label for="current_password">Текуща парола:</label>
+                    <input type="password" id="current_password" name="current_password"
+                           autocomplete="current-password">
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="new_password">Нова парола:</label>
+                        <input type="password" id="new_password" name="new_password"
+                               autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="confirm_password">Потвърди новата парола:</label>
+                        <input type="password" id="confirm_password" name="confirm_password"
+                               autocomplete="new-password">
+                    </div>
+                </div>
+                <div class="hint">Оставете полетата за парола празни, ако не желаете промяна.</div>
+            </div>
+
+            <button type="submit" class="btn">💾 Запази настройките</button>
+        </form>
+
+        <!-- ── Wrangler reference ── -->
+        <div class="card" style="margin-top: 32px;">
+            <h2>ℹ️ Конфигурация на Cloudflare Worker (Wrangler CLI)</h2>
+            <p style="color:#aaa; font-size:0.88rem; margin: 0 0 14px; line-height:1.6;">
+                AI ключът и моделът се управляват чрез Wrangler. Изпълнете следните команди:
+            </p>
+            <pre># 1. Инсталирайте Wrangler (веднъж)
+npm install -g wrangler
+
+# 2. Влезте в Cloudflare
+wrangler login
+
+# 3. Създайте KV namespace и копирайте ID-тата в wrangler.toml
+wrangler kv namespace create IRIS_KV
+
+# 4. Задайте AI API ключ (поставете ключа когато бъдете попитани)
+wrangler secret put AI_API_KEY
+
+# 5. Редактирайте wrangler.toml ако искате друг модел или base URL
+#    AI_MODEL   = "gpt-4o"
+#    AI_BASE_URL = "https://api.openai.com/v1"
+
+# 6. Деплойвайте Worker-а
+wrangler deploy
+
+# → Получавате URL от вида: https://iris-analyzer.&lt;subdomain&gt;.workers.dev
+#   Поставете го по-горе в полето "URL на деплойнатия Worker".</pre>
+        </div>
+
+    </div><!-- /container -->
+
+    <script>
+        async function testWorker() {
+            const url = document.getElementById('worker_url').value.trim();
+            const el  = document.getElementById('test-result');
+            if (!url) {
+                el.innerHTML = '<span style="color:#ffc107;">⚠️ Въведете URL на Worker-а</span>';
+                return;
+            }
+            el.innerHTML = '<span style="color:#aaa;">Проверява се…</span>';
+            try {
+                const testUrl = url.replace(/\/$/, '') + '/result/ping:test';
+                const resp = await fetch(testUrl, {
+                    method: 'GET',
+                    signal: AbortSignal.timeout(6000)
+                });
+                if (resp.status === 200 || resp.status === 404) {
+                    el.innerHTML = '<span style="color:#28a745;">✅ Worker е достъпен</span>';
+                } else {
+                    el.innerHTML = `<span style="color:#ffc107;">⚠️ Статус ${resp.status}</span>`;
+                }
+            } catch (e) {
+                el.innerHTML = `<span style="color:#ff6b6b;">❌ Неуспешно: ${e.message}</span>`;
+            }
+        }
+    </script>
+</body>
+</html>
