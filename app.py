@@ -2,9 +2,36 @@ import os
 import cv2
 import numpy as np
 import base64
-from flask import Flask, request, jsonify, render_template
+import json
+import secrets
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+# ==========================================
+# CONFIG MANAGEMENT
+# ==========================================
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    config = {
+        'secret_key': secrets.token_hex(32),
+        'admin_password_hash': generate_password_hash('admin'),
+        'worker_url': ''
+    }
+    save_config(config)
+    return config
+
+def save_config(config):
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=2)
+
+_config = load_config()
+app.secret_key = _config['secret_key']
 
 # ==========================================
 # 1. PREPROCESSING
@@ -351,6 +378,66 @@ def draw_overlay(img, px, py, pr, ir):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+# ==========================================
+# 8. ADMIN PANEL
+# ==========================================
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    error = None
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        cfg = load_config()
+        if check_password_hash(cfg['admin_password_hash'], password):
+            session['admin_logged_in'] = True
+            return redirect(url_for('admin'))
+        error = 'Невалидна парола.'
+    return render_template('admin_login.html', error=error)
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return redirect(url_for('admin_login'))
+
+@app.route('/admin', methods=['GET'])
+def admin():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login'))
+    cfg = load_config()
+    return render_template('admin.html', worker_url=cfg.get('worker_url', ''))
+
+@app.route('/admin/settings', methods=['POST'])
+def admin_settings():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login'))
+
+    cfg = load_config()
+    cfg['worker_url'] = request.form.get('worker_url', '').strip()
+
+    error = None
+    success = None
+    new_password = request.form.get('new_password', '')
+    if new_password:
+        current_password = request.form.get('current_password', '')
+        confirm_password = request.form.get('confirm_password', '')
+        if not check_password_hash(cfg['admin_password_hash'], current_password):
+            error = 'Грешна текуща парола.'
+        elif new_password != confirm_password:
+            error = 'Новите пароли не съвпадат.'
+        else:
+            cfg['admin_password_hash'] = generate_password_hash(new_password)
+            success = 'Настройките са запазени успешно.'
+    else:
+        success = 'Настройките са запазени успешно.'
+
+    save_config(cfg)
+    return render_template('admin.html', worker_url=cfg.get('worker_url', ''),
+                           error=error, success=success)
+
+@app.route('/api/config')
+def api_config():
+    cfg = load_config()
+    return jsonify({'worker_url': cfg.get('worker_url', '')})
 
 @app.route('/process', methods=['POST'])
 def process():
