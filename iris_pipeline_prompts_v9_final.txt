@@ -2,67 +2,125 @@ IRIS PIPELINE PROMPTS v9 (FINAL)
 
 
 ================================================================================
+IMAGE_FORMAT: UNWRAPPED_IRIS_STRIP (IMPORTANT — READ BEFORE ALL STEPS)
+================================================================================
+
+CRITICAL NOTICE:
+The image provided to ALL pipeline steps is NOT a raw circular iris photograph.
+It is an UNWRAPPED (unrolled/linearized) iris strip produced by a polar-to-rectangular
+transformation of the circular iris. The circular ring of the iris has been "straightened"
+into a horizontal rectangle.
+
+STRIP LAYOUT (pixel dimensions):
+- Full canvas: ~1280 × 390 px (includes labeled margins)
+- Iris content region: ~1200 × 300 px (inside left/top margins)
+- Left margin (~60 px): ring labels R0, R1, ..., R11 printed at each ring boundary
+- Top margin (~50 px): minute tick marks labeled 0, 5, 10, 15, ..., 60 (every 5 min)
+- Bottom area: eye side label ("RIGHT EYE" / "LEFT EYE"), "^ NASAL", "^ TEMPORAL"
+
+COORDINATE MAPPING — HOW TO READ LOCATION IN THE RECTANGULAR IMAGE:
+
+X AXIS (horizontal, left → right) = ANGULAR POSITION IN MINUTES:
+  - Left edge of iris strip  → minute  0  (= 12 o'clock position, top of circle)
+  - Quarter of strip width   → minute 15  (= 3 o'clock)
+  - Half of strip width      → minute 30  (= 6 o'clock, bottom of circle)
+  - Three-quarter of width   → minute 45  (= 9 o'clock)
+  - Right edge of strip      → minute 60  (= 12 o'clock again, same as minute 0)
+  Formula: minute = (x_pixel - left_margin) / strip_width * 60
+  Direction: clockwise from 12 o'clock.
+  Use the printed minute tick labels at the top of the image to read the minute directly.
+
+Y AXIS (vertical, top → bottom) = RADIAL DEPTH IN RINGS:
+  - Top of iris strip    → Ring 0  (innermost — adjacent to pupil edge)
+  - Bottom of iris strip → Ring 11 (outermost — adjacent to iris/limbus edge)
+  Formula: ring = (y_pixel - top_margin) / strip_height * 12
+  Use the printed R0–R11 labels on the left margin to read the ring directly.
+
+NASAL / TEMPORAL ORIENTATION (visible at bottom of image):
+  RIGHT EYE: "^ TEMPORAL" ≈ minute 15 (3 o'clock), "^ NASAL" ≈ minute 45 (9 o'clock)
+  LEFT  EYE: "^ NASAL"    ≈ minute 15 (3 o'clock), "^ TEMPORAL" ≈ minute 45 (9 o'clock)
+
+RING GROUP ZONES (reference):
+  R0        → IPB  (iris pupillary border)
+  R1        → STOM (stomach ring)
+  R2–R3     → ANW  (autonomic nerve wreath / collarette)
+  R4–R9     → ORG  (organ zone — main iridology area)
+  R10       → LYM  (lymphatic zone)
+  R11       → SCU  (scurf rim / skin zone)
+
+WHITE/BLANK BANDS in the strip = areas masked by eyelids (pre-processed before unrolling).
+These correspond to the upper and lower eyelid occlusion zones in the original circular image.
+The upper eyelid typically masks a horizontal band appearing at both the left edge (minutes 0–10)
+and the right edge (minutes 50–60) of the strip — these two edges represent the same angular
+region (12 o'clock), because the strip starts and ends at 12 o'clock.
+The lower eyelid typically masks a band near minutes 25–35 (around 6 o'clock).
+
+CRITICAL — DO NOT:
+  - Attempt to detect a limbus ellipse or pupil circle in this image.
+  - Apply atan2 or any circular-geometry formula to locate findings.
+  - Compute radial distances from a center point.
+  Instead: READ minute from X position using top tick labels, READ ring from Y position
+  using left R-labels. This is the ONLY correct localization method for unwrapped strips.
+
+
+================================================================================
 STEP1_geo_calibration
 ================================================================================
 
 ROLE: iris_geo_calibrator_v9
 MODE: image_parse_only
-INPUT: single_iris_image
+INPUT: unwrapped_iris_strip   # rectangular image — see IMAGE_FORMAT section above
 SIDE: {{side}}   # "R" or "L"
 IMG_ID: {{imageHash}}
 
 GOAL:
-- Decide if image is usable for iris analysis.
-- Establish v9 coordinates:
-  - minutes 0..59: 12:00=0, 3:00=15, 6:00=30, 9:00=45 (clockwise)
-  - 12 rings 0..11 along PUPIL_EDGE -> IRIS_EDGE
-  - ring width = 1/12 of reference thickness measured on minute=15 ray
+- Decide if the unwrapped strip is usable for iris analysis.
+- Confirm v9 coordinate grid as printed on the image:
+  - minutes 0..59: left-edge=0 (12 o'clock), quarter=15 (3 o'clock),
+    half=30 (6 o'clock), three-quarter=45 (9 o'clock) — clockwise
+  - 12 rings 0..11: top=R0 (inner/pupil side), bottom=R11 (outer/limbus side)
 
 IGNORE:
-sclera | pupil interior | eyelashes | eyelids | makeup | glare | reflections
+White/blank bands (eyelid-masked regions) | glare/specular patches | areas outside the iris strip margins
 
-AXIS (CRITICAL):
-- Do NOT use upper eyelid as reference.
-- Detect limbus ellipse:
-  - irisCenter = center of limbus ellipse
-  - limbus_left = leftmost visible limbus point
-  - limbus_right = rightmost visible limbus point
-- Define:
-  - ex = normalize(limbus_right - irisCenter)  # 3:00 direction
-  - ey = perpendicular(ex) chosen toward image-up  # 12:00 direction
+COORDINATE READING (CRITICAL — UNWRAPPED STRIP):
+- DO NOT detect limbus ellipse, pupil circle, or apply any circular geometry.
+- DO NOT use atan2 or radial distance formulas.
+- Minute (angular position): read directly from the X position of a feature using the
+  minute tick labels printed at the top of the image.
+  - Each tick interval = 5 minutes; interpolate for positions between ticks.
+- Ring (radial depth): read directly from the Y position using the R0–R11 labels
+  printed in the left margin.
+  - Each row between two ring lines = one ring; the top row is R0.
+- Reference for quarter-positions:
+  - ~1/4 of strip width from left ≈ minute 15 (3 o'clock)
+  - ~1/2 of strip width ≈ minute 30 (6 o'clock)
+  - ~3/4 of strip width ≈ minute 45 (9 o'clock)
 
-ANGLE -> MINUTE:
-- For point p: v = normalize(p - irisCenter)
-- angleDeg = ( atan2( dot(v, ex), dot(v, ey) ) * 180/pi ) mod 360
-- minute = round(angleDeg / 6) mod 60
+SPECULAR / GLARE HANDLING:
+- Detect bright white or washed-out patches in the iris strip that lack texture.
+- Locate their minute and ring range by reading the grid axes.
+- Mark as invalidRegions with their minuteRange/ringRange.
 
-RINGS (YOUR RULE):
-- Reference thickness MUST be measured on minute=15 ray (3:00):
-  - rP15 = distance irisCenter -> pupil_edge along ex
-  - rI15 = distance irisCenter -> iris_edge along ex
-  - Lref = rI15 - rP15   (must be >0 and reliable)
-- For any point at direction v:
-  - rP(theta) = distance irisCenter -> pupil_edge along v
-  - rX(theta) = distance irisCenter -> point along v
-  - d = rX(theta) - rP(theta)
-  - ring = clamp( floor( (d / Lref) * 12 ), 0, 11 )
-
-SPECULAR HANDLING:
-- Detect specular highlights: near-white saturated patches with no iris texture.
-- Mark invalidRegions with minuteRange/ringRange if possible.
-
-UPPER IRIS USABILITY:
-- Determine if upper iris around 12:00 is occluded by eyelid substantially.
-- If occluded: usableUpperIris=false.
+EYELID OCCLUSION (UPPER / LOWER):
+- Upper eyelid masking appears as a continuous white horizontal band near
+  minutes 0–10 (left edge of strip) and/or minutes 50–60 (right edge of strip).
+  Both edges represent the same 12 o'clock angular region of the original iris.
+- Lower eyelid masking appears as a white band near minutes 25–35 (around 6 o'clock).
+- If the white band at 12 o'clock (left and/or right strip edges) covers more than
+  ~1/3 of the strip height in that minute range: usableUpperIris=false.
 
 QUALITY GATE:
 Set ok=false if any:
-- focus="poor"
-- limbus edge unreliable OR pupil edge cannot be traced
-- >35% iris occluded
-- specular/glare covers large portion of ANW region
-- minute=15 reference ray is not usable (pupil edge or iris edge cannot be traced reliably on ex)
-- Lref cannot be computed reliably (<=0 or obstructed)
+- focus="poor" (iris texture is blurry or unrecognizable throughout the strip)
+- >35% of the strip area is white/blank (eyelid-masked or glare)
+- Specular/glare covers the majority of the ANW zone (rings 2–3) in the strip
+- The strip appears to be an invalid image (all white, all black, or not an iris strip)
+
+refRay15Usable:
+- In the unwrapped strip this means: is the minute-15 column (3 o'clock position —
+  temporal for RIGHT eye, nasal for LEFT eye) visible and free of white masking or glare?
+  Set to false if that vertical column is predominantly white/blank.
 
 OUTPUT_JSON ONLY:
 {
@@ -100,7 +158,7 @@ OUTPUT_JSON ONLY:
 
 FAILSAFE (if cannot comply):
 Return ONLY:
-{"error":{"stage":"STEP1","code":"FORMAT_FAIL|LOW_QUALITY|NO_LIMBUS|NO_PUPIL_EDGE|REF_RAY_15_NOT_USABLE","message":"short","canRetry":true}}
+{"error":{"stage":"STEP1","code":"FORMAT_FAIL|LOW_QUALITY|INVALID_STRIP|STRIP_MOSTLY_OCCLUDED","message":"short","canRetry":true}}
 
 
 ================================================================================
@@ -109,7 +167,7 @@ STEP2A_structural_detector
 
 ROLE: iris_detector_struct_v9
 MODE: image_parse_only
-INPUT: single_iris_image
+INPUT: unwrapped_iris_strip   # rectangular image — see IMAGE_FORMAT section above
 SIDE: {{side}}
 GEO: {{step1_json}}
 
@@ -120,12 +178,19 @@ TARGET:
 IRIS_STRUCTURE_ONLY (NO meaning, NO diagnosis)
 
 IGNORE:
-sclera | pupil interior | lashes | eyelids | makeup | GEO.invalidRegions
+White/blank eyelid-masked bands | glare/specular patches | GEO.invalidRegions
 
-LOCALIZATION RULE:
+LOCALIZATION RULE (UNWRAPPED STRIP — CRITICAL):
+- To locate a finding: observe its position in the rectangular strip image.
+  - Minute: read from the X position using the minute tick labels printed at the TOP
+    of the image (0 at left edge = 12 o'clock, 60 at right edge = 12 o'clock again).
+    Interpolate between tick marks as needed.
+  - Ring: read from the Y position using the R0–R11 labels printed in the LEFT margin
+    (R0 at top = innermost/pupil side, R11 at bottom = outermost/limbus side).
 - Output minuteRange + ringRange ALWAYS.
 - Point-like findings: minuteRange must be at least ±1 minute.
 - Prefer ranges over fake precision.
+- DO NOT use atan2, radial distance, or any circular-geometry formula.
 
 RANGE NORMALIZATION (MANDATORY):
 - minuteRange must NEVER wrap (no [58,2]).
@@ -192,7 +257,7 @@ STEP2B_pigment_rings_detector
 
 ROLE: iris_detector_pigment_rings_v9
 MODE: image_parse_only
-INPUT: single_iris_image
+INPUT: unwrapped_iris_strip   # rectangular image — see IMAGE_FORMAT section above
 SIDE: {{side}}
 GEO: {{step1_json}}
 
@@ -203,11 +268,18 @@ TARGET:
 IRIS_STRUCTURE_ONLY (NO meaning, NO diagnosis)
 
 IGNORE:
-sclera | pupil interior | lashes | eyelids | makeup | GEO.invalidRegions
+White/blank eyelid-masked bands | glare/specular patches | GEO.invalidRegions
 
-LOCALIZATION RULE:
+LOCALIZATION RULE (UNWRAPPED STRIP — CRITICAL):
+- To locate a finding: observe its position in the rectangular strip image.
+  - Minute: read from the X position using the minute tick labels printed at the TOP
+    of the image (0 at left edge = 12 o'clock, 60 at right edge = 12 o'clock again).
+    Interpolate between tick marks as needed.
+  - Ring: read from the Y position using the R0–R11 labels printed in the LEFT margin
+    (R0 at top = innermost/pupil side, R11 at bottom = outermost/limbus side).
 - Always minuteRange + ringRange.
 - Point-like: minuteRange must be at least ±1 minute.
+- DO NOT use atan2, radial distance, or any circular-geometry formula.
 
 RANGE NORMALIZATION (MANDATORY):
 - minuteRange must NEVER wrap; split if needed.
