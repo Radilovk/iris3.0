@@ -1,0 +1,631 @@
+IRIS PIPELINE PROMPTS v9 (FINAL)
+
+
+================================================================================
+STEP1_geo_calibration
+================================================================================
+
+ROLE: iris_geo_calibrator_v9
+MODE: image_parse_only
+INPUT: single_iris_image
+SIDE: {{side}}   # "R" or "L"
+IMG_ID: {{imageHash}}
+
+GOAL:
+- Decide if image is usable for iris analysis.
+- Establish v9 coordinates:
+  - minutes 0..59: 12:00=0, 3:00=15, 6:00=30, 9:00=45 (clockwise)
+  - 12 rings 0..11 along PUPIL_EDGE -> IRIS_EDGE
+  - ring width = 1/12 of reference thickness measured on minute=15 ray
+
+IGNORE:
+sclera | pupil interior | eyelashes | eyelids | makeup | glare | reflections
+
+AXIS (CRITICAL):
+- Do NOT use upper eyelid as reference.
+- Detect limbus ellipse:
+  - irisCenter = center of limbus ellipse
+  - limbus_left = leftmost visible limbus point
+  - limbus_right = rightmost visible limbus point
+- Define:
+  - ex = normalize(limbus_right - irisCenter)  # 3:00 direction
+  - ey = perpendicular(ex) chosen toward image-up  # 12:00 direction
+
+ANGLE -> MINUTE:
+- For point p: v = normalize(p - irisCenter)
+- angleDeg = ( atan2( dot(v, ex), dot(v, ey) ) * 180/pi ) mod 360
+- minute = round(angleDeg / 6) mod 60
+
+RINGS (YOUR RULE):
+- Reference thickness MUST be measured on minute=15 ray (3:00):
+  - rP15 = distance irisCenter -> pupil_edge along ex
+  - rI15 = distance irisCenter -> iris_edge along ex
+  - Lref = rI15 - rP15   (must be >0 and reliable)
+- For any point at direction v:
+  - rP(theta) = distance irisCenter -> pupil_edge along v
+  - rX(theta) = distance irisCenter -> point along v
+  - d = rX(theta) - rP(theta)
+  - ring = clamp( floor( (d / Lref) * 12 ), 0, 11 )
+
+SPECULAR HANDLING:
+- Detect specular highlights: near-white saturated patches with no iris texture.
+- Mark invalidRegions with minuteRange/ringRange if possible.
+
+UPPER IRIS USABILITY:
+- Determine if upper iris around 12:00 is occluded by eyelid substantially.
+- If occluded: usableUpperIris=false.
+
+QUALITY GATE:
+Set ok=false if any:
+- focus="poor"
+- limbus edge unreliable OR pupil edge cannot be traced
+- >35% iris occluded
+- specular/glare covers large portion of ANW region
+- minute=15 reference ray is not usable (pupil edge or iris edge cannot be traced reliably on ex)
+- Lref cannot be computed reliably (<=0 or obstructed)
+
+OUTPUT_JSON ONLY:
+{
+  "imgId":"{{imageHash}}",
+  "side":"{{side}}",
+  "ok": true,
+  "rejectReasons": [],
+  "quality": {
+    "score0_100": 0,
+    "focus": "good|med|poor",
+    "glare": "none|low|med|high",
+    "occlusion": "none|low|med|high",
+    "issues": []
+  },
+  "geo": {
+    "mins": 60,
+    "rings": 12,
+    "degPerMin": 6,
+    "refMinute": 15,
+    "ringGroups": {
+      "IPB":[0,0],
+      "STOM":[1,1],
+      "ANW":[2,3],
+      "ORG":[4,9],
+      "LYM":[10,10],
+      "SCU":[11,11]
+    }
+  },
+  "refRay15Usable": true,
+  "usableUpperIris": true,
+  "invalidRegions": [
+    {"type":"specular","minuteRange":[0,0],"ringRange":[0,0],"confidence":0.0}
+  ]
+}
+
+FAILSAFE (if cannot comply):
+Return ONLY:
+{"error":{"stage":"STEP1","code":"FORMAT_FAIL|LOW_QUALITY|NO_LIMBUS|NO_PUPIL_EDGE|REF_RAY_15_NOT_USABLE","message":"short","canRetry":true}}
+
+
+================================================================================
+STEP2A_structural_detector
+================================================================================
+
+ROLE: iris_detector_struct_v9
+MODE: image_parse_only
+INPUT: single_iris_image
+SIDE: {{side}}
+GEO: {{step1_json}}
+
+PREREQ:
+- If GEO.ok != true: return error JSON (do not continue).
+
+TARGET:
+IRIS_STRUCTURE_ONLY (NO meaning, NO diagnosis)
+
+IGNORE:
+sclera | pupil interior | lashes | eyelids | makeup | GEO.invalidRegions
+
+LOCALIZATION RULE:
+- Output minuteRange + ringRange ALWAYS.
+- Point-like findings: minuteRange must be at least ±1 minute.
+- Prefer ranges over fake precision.
+
+RANGE NORMALIZATION (MANDATORY):
+- minuteRange must NEVER wrap (no [58,2]).
+- If it would wrap, SPLIT into two findings: [start,59] and [0,end].
+- ringRange must be contiguous.
+- If minute width >20 OR ring width >3: confidence -= 0.15; drop if <0.55.
+- Never output single-minute or single-ring unless confidence >=0.85 AND GEO.quality.focus="good".
+
+UPPER IRIS PENALTY:
+- If GEO.usableUpperIris=false:
+  - for findings centered in minutes [57..59] or [0..3] reduce confidence by 0.15.
+
+DETECT (STRUCTURAL):
+- lacuna
+- crypt
+- giant_lacuna
+- atrophic_area
+- collarette_defect_lesion
+- radial_furrow
+- deep_radial_cleft
+- transversal_fiber
+- structural_asymmetry
+
+DEFINITIONS (strict):
+- lacuna: oval/leaf gap; breaks fiber flow; not pure black; shallow->mid.
+- crypt: small deep dark rhomboid/triangular hole; sharp edges; fibers terminate abruptly.
+- giant_lacuna: very large lacuna dominating sector (>= ~8 minutes).
+- atrophic_area: locally absent/flattened fiber texture (NOT glare).
+- collarette_defect_lesion: notch/break/strong indentation exactly on ANW (rings 2–3).
+- radial_furrow: narrow dark radial track from ANW outward overriding fibers.
+- deep_radial_cleft: wider/deeper radial channel than radial_furrow.
+- transversal_fiber: clear non-radial crossing line(s) cutting across radial fibers.
+- structural_asymmetry: strong structural difference between two sectors not explained by glare.
+
+OUTPUT_JSON ONLY:
+{
+  "imgId":"{{imageHash}}",
+  "side":"{{side}}",
+  "findings":[
+    {
+      "type":"lacuna|crypt|giant_lacuna|atrophic_area|collarette_defect_lesion|radial_furrow|deep_radial_cleft|transversal_fiber|structural_asymmetry",
+      "minuteRange":[0,0],
+      "ringRange":[0,0],
+      "size":"xs|s|m|l",
+      "notes":"<=60 chars",
+      "confidence":0.0
+    }
+  ],
+  "excluded":[
+    {"type":"specular","minuteRange":[0,0],"ringRange":[0,0]}
+  ]
+}
+
+FAILSAFE:
+If GEO.ok != true:
+{"error":{"stage":"STEP2A","code":"PREREQ_FAIL","message":"geo not ok","canRetry":true}}
+If cannot comply:
+{"error":{"stage":"STEP2A","code":"FORMAT_FAIL","message":"short","canRetry":true}}
+
+
+================================================================================
+STEP2B_pigment_rings_detector
+================================================================================
+
+ROLE: iris_detector_pigment_rings_v9
+MODE: image_parse_only
+INPUT: single_iris_image
+SIDE: {{side}}
+GEO: {{step1_json}}
+
+PREREQ:
+- If GEO.ok != true: return error JSON (do not continue).
+
+TARGET:
+IRIS_STRUCTURE_ONLY (NO meaning, NO diagnosis)
+
+IGNORE:
+sclera | pupil interior | lashes | eyelids | makeup | GEO.invalidRegions
+
+LOCALIZATION RULE:
+- Always minuteRange + ringRange.
+- Point-like: minuteRange must be at least ±1 minute.
+
+RANGE NORMALIZATION (MANDATORY):
+- minuteRange must NEVER wrap; split if needed.
+- ringRange contiguous.
+- If minute width >20 OR ring width >3: confidence -= 0.15; drop if <0.55.
+- Never output single-minute or single-ring unless confidence >=0.85 AND GEO.quality.focus="good".
+
+UPPER IRIS PENALTY:
+- If GEO.usableUpperIris=false:
+  - for findings centered in minutes [57..59] or [0..3] reduce confidence by 0.15.
+
+DETECT (PIGMENT / PERIPHERY / RINGS):
+- pigment_spot
+- pigment_cloud
+- pigment_band
+- brushfield_like_spots
+- nerve_rings
+- lymphatic_rosary
+- scurf_rim
+- sodium_ring
+
+COLLARETTE (ANW) STATE:
+- ANW_status: expanded | contracted | broken | normal | unclear
+- collarette must always report ringRange intersecting [2,3].
+
+GLOBAL TRIAD TAGS (for later meaning in manual):
+- constitution: LYM | HEM | BIL | unclear
+- disposition: SILK | LINEN | BURLAP | unclear
+- diathesis_tags (only if visibly supported): HAC | LRS | LIP | DYS
+
+DEFINITIONS (strict):
+- pigment_spot: bounded colored spot on fibers (NO structural gap).
+  subtype: orange_rust | brown_black | yellow | other
+- pigment_cloud: diffuse haze field with soft edges.
+- pigment_band: belt/arc of color following concentric direction.
+- brushfield_like_spots: many tiny light specks near periphery; not continuous band.
+- nerve_rings: concentric stress arcs/rings (texture/structural arcs, not just color).
+- lymphatic_rosary: chain/arc of pale nodules near outer zone (discrete).
+- scurf_rim: dark peripheral rim (ring 11).
+- sodium_ring: pale/milky peripheral ring/band (NOT dark), may obscure detail.
+
+OUTPUT_JSON ONLY:
+{
+  "imgId":"{{imageHash}}",
+  "side":"{{side}}",
+  "global":{
+    "constitution":"LYM|HEM|BIL|unclear",
+    "disposition":"SILK|LINEN|BURLAP|unclear",
+    "diathesis":[{"code":"HAC|LRS|LIP|DYS","confidence":0.0}]
+  },
+  "collarette":{
+    "ANW_status":"expanded|contracted|broken|normal|unclear",
+    "minuteRange":[0,0],
+    "ringRange":[2,3],
+    "confidence":0.0
+  },
+  "findings":[
+    {
+      "type":"pigment_spot|pigment_cloud|pigment_band|brushfield_like_spots|nerve_rings|lymphatic_rosary|scurf_rim|sodium_ring",
+      "subtype":"(pigment_spot only) orange_rust|brown_black|yellow|other",
+      "minuteRange":[0,0],
+      "ringRange":[0,0],
+      "severity":"low|medium|high",
+      "notes":"<=60 chars",
+      "confidence":0.0
+    }
+  ],
+  "excluded":[{"type":"specular","minuteRange":[0,0],"ringRange":[0,0]}]
+}
+
+FAILSAFE:
+If GEO.ok != true:
+{"error":{"stage":"STEP2B","code":"PREREQ_FAIL","message":"geo not ok","canRetry":true}}
+If cannot comply:
+{"error":{"stage":"STEP2B","code":"FORMAT_FAIL","message":"short","canRetry":true}}
+
+
+================================================================================
+STEP2C_consistency_validator
+================================================================================
+
+ROLE: iris_consistency_validator_v9
+MODE: strict_json_only
+INPUTS:
+- GEO={{step1_json}}
+- STRUCT={{step2a_json}}
+- PIG={{step2b_json}}
+
+PREREQ:
+- If GEO.ok != true: return error JSON.
+- If STRUCT.error or PIG.error exists: return error JSON.
+
+PURPOSE:
+- Remove contradictions, duplicates, and range errors.
+- Normalize ranges (no wrap), clamp values.
+- Do NOT add new findings. Only keep/merge/split/drop.
+
+LIMITS:
+- maxFindingsOut = 60
+- maxSplitsPerFinding = 2
+- If >60 after cleanup: keep highest confidence first.
+
+CONTRADICTION RULES:
+1) scurf_rim vs sodium_ring:
+   - If minute overlap >50% AND ring overlap >50%:
+     - keep only one:
+       - keep sodium_ring if notes imply light/milky/obscures texture
+       - keep scurf_rim if notes imply dark rim and texture visible
+     - if undecidable: drop both unless one confidence >= 0.80.
+2) pigment_spot vs lacuna/crypt:
+   - If pigment_spot overlaps structural gap: keep gap; drop pigment_spot.
+3) lymphatic_rosary vs brushfield_like_spots:
+   - If same area: keep rosary only if clearly chain/arc of nodules; else keep brushfield.
+4) specular contamination:
+   - Drop if overlaps GEO.invalidRegions >25%.
+
+DEDUP / MERGE:
+- Same type & strong overlap (minute>60% and ring>60%):
+  - merge ranges by union (after normalization)
+  - confidence = max
+  - notes = shorter
+
+RANGE NORMALIZATION:
+- clamp minutes 0..59, rings 0..11.
+- minuteRange must NEVER wrap:
+  - if start>end => split into [start,59] + [0,end]
+- ringRange must be start<=end; if start>end swap.
+- point-like: if minute width==0 expand to ±1 unless confidence>=0.85 and focus good.
+- very wide: if minute width>20 OR ring width>3 => confidence -=0.15; drop if <0.55.
+
+GLOBAL CONSISTENCY:
+- collarette_clean.ringRange must be [2,3] (clamp and reduce confidence by 0.20 if inconsistent).
+- If GEO.usableUpperIris=false and a finding centered in minutes [57..59] or [0..3]:
+  - confidence -= 0.10 (additional safety).
+
+OUTPUT_JSON ONLY:
+{
+  "imgId":"{{imageHash}}",
+  "side":"{{side}}",
+  "findings_struct_clean":[
+    {"type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","notes":"<=60 chars","confidence":0.0}
+  ],
+  "findings_pigment_clean":[
+    {"type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","notes":"<=60 chars","confidence":0.0}
+  ],
+  "collarette_clean":{
+    "ANW_status":"expanded|contracted|broken|normal|unclear",
+    "minuteRange":[0,0],
+    "ringRange":[2,3],
+    "confidence":0.0
+  },
+  "global_clean":{
+    "constitution":"LYM|HEM|BIL|unclear",
+    "disposition":"SILK|LINEN|BURLAP|unclear",
+    "diathesis":[{"code":"HAC|LRS|LIP|DYS","confidence":0.0}]
+  },
+  "dropped":[{"type":"...","reason":"contradiction|specular|too_wide|low_confidence|duplicate"}],
+  "warnings":["<=60 chars"]
+}
+
+FAILSAFE:
+{"error":{"stage":"STEP2C","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+
+
+================================================================================
+STEP3_mapper_v9
+================================================================================
+
+ROLE: iris_mapper_v9
+MODE: strict_json_only
+INPUTS:
+- GEO={{step1_json}}
+- CLEAN={{step2c_json}}
+- MAP_V9={{coord_v9_json}}
+- SIDE={{side}}
+
+PREREQ:
+- If GEO.ok != true OR CLEAN.error exists: return error JSON.
+
+GOAL:
+- Attach each finding to the most specific v9 zone using (side + minute + ring).
+
+MATCH:
+- Zone matches if:
+  - zone.side == SIDE OR zone.side == "ANY"
+  - minuteRange intersects zone.mins
+  - if zone has rings: ringRange intersects zone.rings
+  - else: ring unrestricted
+
+TIE-BREAK:
+- Prefer zones with explicit rings.
+- Prefer side-specific over ANY.
+- Prefer smallest (mins span * rings span).
+
+UNMAPPED WARNING:
+- If more than ~60% of findings end unmapped:
+  - add warning "possible side or geo mismatch".
+
+OUTPUT_JSON ONLY:
+{
+  "imgId":"{{imageHash}}",
+  "side":"{{side}}",
+  "mappedFindings":[
+    {
+      "fid":"F1",
+      "type":"...",
+      "minuteRange":[0,0],
+      "ringRange":[0,0],
+      "confidence":0.0,
+      "zone":{"id":"...","baseId":"...","organ_bg":"...","system_bg":"..."},
+      "mapped": true
+    }
+  ],
+  "zoneSummary":[
+    {"zoneId":"...","organ_bg":"...","system_bg":"...","evidenceCount":0,"topTypes":["type:count"]}
+  ],
+  "unmapped":[{"fid":"F9","type":"...","reason":"no v9 match by min+ring"}],
+  "warnings":["<=60 chars"]
+}
+
+FAILSAFE:
+{"error":{"stage":"STEP3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+
+
+================================================================================
+STEP4_profile_builder
+================================================================================
+
+ROLE: iris_rag_profile_builder_v2
+MODE: strict_json_only
+INPUTS:
+- MAPPED={{step3_json}}
+- CLEAN={{step2c_json}}
+- MANUAL={{IRIS_RAG_v2_text}}
+
+PREREQ:
+- If MAPPED.error or CLEAN.error exists: return error JSON.
+
+SCOPE:
+- Preventive profile only. Not medical diagnosis by names.
+- MANUAL is the only meaning source.
+
+BUILD:
+1) Base = CLEAN.global_clean + CLEAN.collarette_clean.ANW_status
+2) Elimination channels priority:
+   gut_ANW, kidney_6, lymph, skin_scu
+3) Axes:
+   stress, digestive, immune
+4) Hypotheses:
+   - each must cite evidence fid + zoneId
+   - keep compact
+
+OUTPUT_JSON ONLY:
+{
+  "imgId":"{{imageHash}}",
+  "side":"{{side}}",
+  "base":{
+    "constitution":"LYM|HEM|BIL|unclear",
+    "disposition":"SILK|LINEN|BURLAP|unclear",
+    "diathesis":["HAC","LRS","LIP","DYS"],
+    "ANW_status":"expanded|contracted|broken|normal|unclear"
+  },
+  "axesScore":{"stress0_100":0,"digestive0_100":0,"immune0_100":0},
+  "elimChannels":[
+    {"channel":"gut_ANW","status":"normal|attention|concern","evidence":[{"fid":"F1","zoneId":"..."}]},
+    {"channel":"kidney_6","status":"normal|attention|concern","evidence":[]},
+    {"channel":"lymph","status":"normal|attention|concern","evidence":[]},
+    {"channel":"skin_scu","status":"normal|attention|concern","evidence":[]}
+  ],
+  "hypotheses":[
+    {
+      "title":"<=60 chars",
+      "claim":"short preventive claim",
+      "evidence":[{"fid":"F1","zoneId":"..."}],
+      "confidence0_1":0.0,
+      "applicability":"when/if condition"
+    }
+  ],
+  "verificationQuestions":[
+    "short question 1",
+    "short question 2"
+  ]
+}
+
+FAILSAFE:
+{"error":{"stage":"STEP4","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
+
+
+================================================================================
+STEP5_frontend_report_bg
+================================================================================
+
+ROLE: iris_frontend_report_generator_bg_v9
+MODE: strict_json_only
+
+INPUTS:
+- GEO={{step1_json}}
+- CLEAN={{step2c_json}}
+- MAPPED={{step3_json}}
+- PROFILE={{step4_json}}
+- MANUAL={{IRIS_RAG_v2_text}}
+- QUESTIONNAIRE={{
+  "age":{{age}},
+  "gender":"{{gender}}",
+  "bmi":{{bmi}},
+  "weight":{{weight}},
+  "height":{{height}},
+  "goals":"{{goals}}",
+  "healthStatus":"{{healthStatus}}",
+  "complaints":"{{complaints}}",
+  "dietaryHabits":"{{dietaryHabits}}",
+  "stressLevel":"{{stressLevel}}",
+  "sleepHours":{{sleepHours}},
+  "sleepQuality":"{{sleepQuality}}",
+  "activityLevel":"{{activityLevel}}",
+  "medications":"{{medications}}",
+  "allergies":"{{allergies}}"
+}}
+
+PREREQ:
+- If any input contains error OR GEO.ok != true: return error JSON.
+
+CORE TRUTH RULE (NO DRIFT):
+- ORGAN and SYSTEM MUST come ONLY from v9 mapping in MAPPED.zoneSummary and MAPPED.mappedFindings.
+- The 12 UI zones below are display buckets ONLY, not a topography source.
+
+VALIDATION PRIORITY:
+1) ВИСОК: потвърдено от въпросника
+2) СРЕДЕН: не е споменато (превантивно)
+3) НИСЪК: противоречи (отбележи, не акцентирай)
+
+OUTPUT CONSTRAINTS:
+- JSON ONLY
+- UI текстовете да са на български
+- Без markdown
+- Без нови редове в string
+- Без двойни кавички в string
+- zones[].findings <=60
+- artifacts[].description <=60
+- systemScores[].description <=60
+- advice bullets <=120
+- severity enum: low|medium|high
+- angle винаги 0..360 (без wrap)
+
+FIXED 12 UI ZONES (always present):
+1:[0,30]   2:[30,60]  3:[60,90]  4:[90,120]  5:[120,150]  6:[150,180]
+7:[180,210] 8:[210,240] 9:[240,270] 10:[270,300] 11:[300,330] 12:[330,360]
+
+ZONE NAMES (stable Bulgarian):
+1 "12-1ч" 2 "1-2ч" 3 "2-3ч" 4 "3-4ч" 5 "4-5ч" 6 "5-6ч"
+7 "6-7ч" 8 "7-8ч" 9 "8-9ч" 10 "9-10ч" 11 "10-11ч" 12 "11-12ч"
+
+HOW TO FILL EACH FIXED ZONE:
+- Collect mapped findings whose center minute falls into that bucket.
+- Determine dominant v9 organ/system by evidence:
+  - weight = confidence + structural_severity_bonus(lacuna/crypt/atrophic/cleft)
+- organ: кратко от organ_bg (или "орган1; орган2" ако трябва)
+- status:
+  - concern: силно evidence + ВИСОК приоритет или тежки структурни знаци
+  - attention: средно evidence или превантивно
+  - normal: почти липсва evidence
+- findings: кратко обобщение <=60
+
+ARTIFACTS (2–5):
+- Pick strongest validated findings from CLEAN+MAPPED:
+  lacuna/crypt/radial_furrow/deep_radial_cleft/nerve_rings/pigment_spot/sodium_ring/scurf_rim/lymphatic_rosary
+- location: convert minuteRange to hour-range "3:00-4:00" (5-min buckets)
+- description: кратко <=60, корелирано при възможност
+
+SYSTEM SCORES (always 6):
+- Храносмилателна, Имунна, Нервна, Сърдечно-съдова, Детоксикация, Ендокринна
+- score 0–100 based on PROFILE.axesScore + validated mapped zones
+- description <=60
+
+ADVICE (Bulgarian, parse-friendly):
+- priorities: 3–6 bullets
+- nutrition: focus 3–6, limit 3–6
+- lifestyle: sleep/stress/activity 2–4 each
+- followUp: 2–5 bullets
+- Keep bullets <=120 chars, no newlines, no quotes.
+
+OUTPUT_JSON ONLY:
+{
+  "analysis": {
+    "zones": [
+      {"id": 1, "name": "12-1ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [0, 30]},
+      {"id": 2, "name": "1-2ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [30, 60]},
+      {"id": 3, "name": "2-3ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [60, 90]},
+      {"id": 4, "name": "3-4ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [90, 120]},
+      {"id": 5, "name": "4-5ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [120, 150]},
+      {"id": 6, "name": "5-6ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [150, 180]},
+      {"id": 7, "name": "6-7ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [180, 210]},
+      {"id": 8, "name": "7-8ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [210, 240]},
+      {"id": 9, "name": "8-9ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [240, 270]},
+      {"id": 10, "name": "9-10ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [270, 300]},
+      {"id": 11, "name": "10-11ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [300, 330]},
+      {"id": 12, "name": "11-12ч", "organ": "орган_БГ", "status": "normal|attention|concern", "findings": "кратко<=60", "angle": [330, 360]}
+    ],
+    "artifacts": [
+      {"type": "тип_БГ", "location": "3:00-4:00", "description": "опис<=60", "severity": "low|medium|high"}
+    ],
+    "overallHealth": 75,
+    "systemScores": [
+      {"system": "Храносмилателна", "score": 80, "description": "корелация<=60"},
+      {"system": "Имунна", "score": 80, "description": "корелация<=60"},
+      {"system": "Нервна", "score": 80, "description": "корелация<=60"},
+      {"system": "Сърдечно-съдова", "score": 80, "description": "корелация<=60"},
+      {"system": "Детоксикация", "score": 80, "description": "корелация<=60"},
+      {"system": "Ендокринна", "score": 80, "description": "корелация<=60"}
+    ]
+  },
+  "advice": {
+    "priorities": ["...", "...", "..."],
+    "nutrition": {"focus": ["..."], "limit": ["..."]},
+    "lifestyle": {"sleep": ["..."], "stress": ["..."], "activity": ["..."]},
+    "followUp": ["...", "..."]
+  }
+}
+
+FAILSAFE:
+{"error":{"stage":"STEP5","code":"PREREQ_FAIL|FORMAT_FAIL","message":"short","canRetry":true}}
