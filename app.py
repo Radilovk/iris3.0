@@ -1,4 +1,5 @@
 import os
+import json
 import cv2
 import numpy as np
 import base64
@@ -374,7 +375,6 @@ def call_worker_analysis(strip_b64, side, questionnaire=None):
             'image_hash': image_hash,
         }
         if questionnaire:
-            import json
             data['questionnaire'] = json.dumps(questionnaire)
 
         # Call the worker
@@ -387,14 +387,15 @@ def call_worker_analysis(strip_b64, side, questionnaire=None):
         if response.status_code == 200:
             return response.json()
         else:
-            return {'error': f'Worker returned {response.status_code}: {response.text[:200]}'}
+            # Sanitize error message - don't expose raw response details
+            return {'error': f'AI analysis service error (status {response.status_code})'}
 
     except requests.exceptions.Timeout:
         return {'error': 'AI analysis timed out. Please try again.'}
     except requests.exceptions.ConnectionError:
         return {'error': 'Cannot connect to AI analysis service.'}
-    except Exception as e:
-        return {'error': f'AI analysis error: {str(e)[:100]}'}
+    except Exception:
+        return {'error': 'AI analysis encountered an unexpected error.'}
 
 
 # ==========================================
@@ -418,7 +419,6 @@ def process():
     q_raw = request.form.get('questionnaire')
     if q_raw:
         try:
-            import json
             questionnaire = json.loads(q_raw)
         except (json.JSONDecodeError, TypeError):
             pass
@@ -509,7 +509,6 @@ def analyze():
     q_raw = request.form.get('questionnaire')
     if q_raw:
         try:
-            import json
             questionnaire = json.loads(q_raw)
         except (json.JSONDecodeError, TypeError):
             pass

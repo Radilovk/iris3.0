@@ -640,14 +640,21 @@
             return 'score-low';
         }
         
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+        
         // Render AI analysis results
         function renderAIResults(container, aiData) {
             if (!aiData || aiData.error) {
+                const errorMsg = escapeHtml(aiData?.error?.message || aiData?.error || 'Грешка при AI анализа');
                 container.innerHTML = `
                     <h3>⚠️ AI Анализ</h3>
-                    <p style="color: var(--danger);">
-                        ${aiData?.error?.message || aiData?.error || 'Грешка при AI анализа'}
-                    </p>
+                    <p style="color: var(--danger);">${errorMsg}</p>
                 `;
                 container.classList.remove('hidden');
                 return;
@@ -660,10 +667,6 @@
                 container.innerHTML = `
                     <h3>⚠️ AI Анализ</h3>
                     <p style="color: var(--warning);">Резултатите от анализа не са налични.</p>
-                    <details>
-                        <summary>Debug данни</summary>
-                        <pre style="font-size: 0.7rem; overflow: auto;">${JSON.stringify(result, null, 2)}</pre>
-                    </details>
                 `;
                 container.classList.remove('hidden');
                 return;
@@ -694,11 +697,12 @@
                         <div class="zones-grid">
                 `;
                 analysis.zones.forEach(zone => {
+                    const statusClass = ['normal', 'attention', 'concern'].includes(zone.status) ? zone.status : 'normal';
                     html += `
-                        <div class="zone-card ${zone.status || 'normal'}">
-                            <div class="zone-name">${zone.name || 'Зона ' + zone.id}</div>
-                            <div class="zone-organ">${zone.organ || ''}</div>
-                            ${zone.findings ? `<div class="zone-findings">${zone.findings}</div>` : ''}
+                        <div class="zone-card ${statusClass}">
+                            <div class="zone-name">${escapeHtml(zone.name || 'Зона ' + zone.id)}</div>
+                            <div class="zone-organ">${escapeHtml(zone.organ || '')}</div>
+                            ${zone.findings ? `<div class="zone-findings">${escapeHtml(zone.findings)}</div>` : ''}
                         </div>
                     `;
                 });
@@ -715,11 +719,12 @@
                         <div class="systems-grid">
                 `;
                 analysis.systemScores.forEach(sys => {
+                    const score = parseInt(sys.score) || 0;
                     html += `
                         <div class="system-card">
-                            <div class="system-name">${sys.system}</div>
-                            <div class="system-score ${getScoreClass(sys.score)}">${sys.score}</div>
-                            <div class="system-desc">${sys.description || ''}</div>
+                            <div class="system-name">${escapeHtml(sys.system)}</div>
+                            <div class="system-score ${getScoreClass(score)}">${score}</div>
+                            <div class="system-desc">${escapeHtml(sys.description || '')}</div>
                         </div>
                     `;
                 });
@@ -736,13 +741,14 @@
                         <div class="artifacts-list">
                 `;
                 analysis.artifacts.forEach(art => {
+                    const severityClass = ['low', 'medium', 'high'].includes(art.severity) ? art.severity : 'low';
                     html += `
-                        <div class="artifact-item severity-${art.severity || 'low'}">
+                        <div class="artifact-item severity-${severityClass}">
                             <div>
-                                <span class="artifact-type">${art.type}</span>
-                                <span class="artifact-location"> @ ${art.location}</span>
+                                <span class="artifact-type">${escapeHtml(art.type)}</span>
+                                <span class="artifact-location"> @ ${escapeHtml(art.location)}</span>
                             </div>
-                            <div class="artifact-desc">${art.description || ''}</div>
+                            <div class="artifact-desc">${escapeHtml(art.description || '')}</div>
                         </div>
                     `;
                 });
@@ -762,7 +768,7 @@
                     html += `
                         <div class="advice-section">
                             <h4>🎯 Приоритети</h4>
-                            <ul>${advice.priorities.map(p => `<li>${p}</li>`).join('')}</ul>
+                            <ul>${advice.priorities.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>
                         </div>
                     `;
                 }
@@ -770,10 +776,10 @@
                 if (advice.nutrition) {
                     html += `<div class="advice-section"><h4>🥗 Хранене</h4>`;
                     if (advice.nutrition.focus && advice.nutrition.focus.length > 0) {
-                        html += `<p><strong>Фокус:</strong></p><ul>${advice.nutrition.focus.map(f => `<li>${f}</li>`).join('')}</ul>`;
+                        html += `<p><strong>Фокус:</strong></p><ul>${advice.nutrition.focus.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>`;
                     }
                     if (advice.nutrition.limit && advice.nutrition.limit.length > 0) {
-                        html += `<p><strong>Ограничете:</strong></p><ul>${advice.nutrition.limit.map(l => `<li>${l}</li>`).join('')}</ul>`;
+                        html += `<p><strong>Ограничете:</strong></p><ul>${advice.nutrition.limit.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>`;
                     }
                     html += `</div>`;
                 }
@@ -781,13 +787,13 @@
                 if (advice.lifestyle) {
                     html += `<div class="advice-section"><h4>🏃 Начин на живот</h4>`;
                     if (advice.lifestyle.sleep && advice.lifestyle.sleep.length > 0) {
-                        html += `<p><strong>Сън:</strong></p><ul>${advice.lifestyle.sleep.map(s => `<li>${s}</li>`).join('')}</ul>`;
+                        html += `<p><strong>Сън:</strong></p><ul>${advice.lifestyle.sleep.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`;
                     }
                     if (advice.lifestyle.stress && advice.lifestyle.stress.length > 0) {
-                        html += `<p><strong>Стрес:</strong></p><ul>${advice.lifestyle.stress.map(s => `<li>${s}</li>`).join('')}</ul>`;
+                        html += `<p><strong>Стрес:</strong></p><ul>${advice.lifestyle.stress.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`;
                     }
                     if (advice.lifestyle.activity && advice.lifestyle.activity.length > 0) {
-                        html += `<p><strong>Активност:</strong></p><ul>${advice.lifestyle.activity.map(a => `<li>${a}</li>`).join('')}</ul>`;
+                        html += `<p><strong>Активност:</strong></p><ul>${advice.lifestyle.activity.map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>`;
                     }
                     html += `</div>`;
                 }
@@ -796,7 +802,7 @@
                     html += `
                         <div class="advice-section">
                             <h4>📋 Последващи действия</h4>
-                            <ul>${advice.followUp.map(f => `<li>${f}</li>`).join('')}</ul>
+                            <ul>${advice.followUp.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>
                         </div>
                     `;
                 }
