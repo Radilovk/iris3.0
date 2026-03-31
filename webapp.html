@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Iris 3.0 - Иридологичен Анализатор</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        :root {
+            --bg-dark: #1a1a1a;
+            --bg-card: #222;
+            --bg-control: #333;
+            --accent: #007bff;
+            --accent-hover: #0056b3;
+            --success: #28a745;
+            --warning: #ffc107;
+            --danger: #dc3545;
+            --text: #ddd;
+            --text-muted: #aaa;
+            --border: #444;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body { 
+            background: var(--bg-dark); 
+            color: var(--text); 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            padding: 15px; 
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+        
+        .container { max-width: 800px; margin: auto; }
+        
+        h1 { 
+            text-align: center; 
+            margin-bottom: 20px; 
+            color: #fff;
+            font-size: 1.5rem;
+        }
+        
+        /* Loading overlay */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .loading-overlay.hidden { display: none; }
+        .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        .loading-text {
+            margin-top: 20px;
+            color: var(--text);
+            font-size: 1rem;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Upload area */
+        .upload-section {
+            background: var(--bg-control);
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        
+        .upload-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        @media (max-width: 500px) {
+            .upload-grid { grid-template-columns: 1fr; }
+        }
+        
+        .upload-box {
+            background: var(--bg-dark);
+            border: 2px dashed var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .upload-box:hover, .upload-box.dragover {
+            border-color: var(--accent);
+            background: rgba(0, 123, 255, 0.1);
+        }
+        .upload-box.has-image {
+            border-color: var(--success);
+            padding: 0;
+        }
+        .upload-box input {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .upload-icon {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        .upload-label {
+            font-weight: 600;
+            color: var(--text);
+        }
+        .upload-hint {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+        .preview-img {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 8px;
+        }
+        .remove-btn {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: var(--danger);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            line-height: 1;
+            z-index: 10;
+        }
+        
+        /* Camera button for mobile */
+        .camera-btn {
+            display: none;
+            width: 100%;
+            padding: 12px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-top: 15px;
+        }
+        @media (max-width: 768px) {
+            .camera-btn { display: block; }
+        }
+        
+        /* Analyze button */
+        .analyze-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, var(--success), #1e7e34);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 15px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .analyze-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(40, 167, 69, 0.4);
+        }
+        .analyze-btn:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+        
+        /* Options */
+        .options {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        .option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+        .option input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+        
+        /* Status */
+        .status {
+            padding: 12px 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 500;
+            text-align: center;
+        }
+        .status.processing {
+            background: rgba(255, 193, 7, 0.15);
+            border: 1px solid var(--warning);
+            color: var(--warning);
+        }
+        .status.success {
+            background: rgba(40, 167, 69, 0.15);
+            border: 1px solid var(--success);
+            color: var(--success);
+        }
+        .status.error {
+            background: rgba(220, 53, 69, 0.15);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+        }
+        .status:empty { display: none; }
+        
+        /* Results */
+        .results {
+            display: none;
+        }
+        .results.visible { display: block; }
+        
+        .result-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: 1px solid var(--border);
+        }
+        .result-card h3 {
+            margin-bottom: 15px;
+            color: #fff;
+            font-size: 1.1rem;
+        }
+        
+        .result-images {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        @media (max-width: 500px) {
+            .result-images { grid-template-columns: 1fr; }
+        }
+        
+        .result-img-container {
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+        .result-img-container img {
+            width: 100%;
+            display: block;
+        }
+        .result-img-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 5px;
+            background: var(--bg-control);
+        }
+        
+        /* AI Results sections */
+        .ai-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border);
+        }
+        .ai-section h4 {
+            color: #fff;
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+        
+        .findings-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 8px;
+        }
+        .finding-card {
+            background: var(--bg-control);
+            padding: 10px;
+            border-radius: 6px;
+            border-left: 3px solid var(--border);
+            font-size: 0.85rem;
+        }
+        .finding-card.normal { border-left-color: var(--success); }
+        .finding-card.attention { border-left-color: var(--warning); }
+        .finding-card.concern { border-left-color: var(--danger); }
+        
+        .report-text {
+            background: var(--bg-control);
+            padding: 15px;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        
+        /* Worker config */
+        .config-section {
+            background: var(--bg-control);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .config-section h3 {
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+        .config-input {
+            width: 100%;
+            padding: 10px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.9rem;
+        }
+        .config-hint {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+        
+        /* Questionnaire */
+        .questionnaire {
+            background: var(--bg-control);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .questionnaire-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .questionnaire-toggle h3 {
+            margin: 0;
+            font-size: 1rem;
+        }
+        .questionnaire-fields {
+            display: none;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            margin-top: 15px;
+        }
+        .questionnaire-fields.open {
+            display: grid;
+        }
+        .field-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .field-group label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .field-group input,
+        .field-group select,
+        .field-group textarea {
+            padding: 8px 10px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.9rem;
+        }
+        .field-group textarea {
+            min-height: 60px;
+            resize: vertical;
+        }
+        .field-group.full-width {
+            grid-column: 1 / -1;
+        }
+        
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+        
+        /* Canvas for processing (hidden) */
+        #processingCanvas { display: none; }
+    </style>
+</head>
+<body>
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-text" id="loadingText">Зареждане на OpenCV.js...</div>
+    </div>
+
+    <div class="container">
+        <h1>🔮 Iris 3.0 - Иридологичен Анализатор</h1>
+        
+        <!-- Worker Configuration -->
+        <div class="config-section">
+            <h3>⚙️ AI Сървър (Cloudflare Worker)</h3>
+            <input type="text" id="workerUrl" class="config-input" 
+                   placeholder="https://your-worker.workers.dev" 
+                   value="">
+            <p class="config-hint">Оставете празно за работа само с обработка на изображения (без AI анализ)</p>
+        </div>
+        
+        <!-- Upload Section -->
+        <div class="upload-section">
+            <div class="upload-grid">
+                <!-- Right Eye -->
+                <div class="upload-box" id="uploadBoxR" onclick="document.getElementById('fileR').click()">
+                    <input type="file" id="fileR" accept="image/*" capture="environment" onchange="handleFileSelect(this, 'R')">
+                    <div class="upload-content" id="uploadContentR">
+                        <div class="upload-icon">👁️</div>
+                        <div class="upload-label">ДЯСНО ОКО</div>
+                        <div class="upload-hint">Докоснете за снимка</div>
+                    </div>
+                </div>
+                
+                <!-- Left Eye -->
+                <div class="upload-box" id="uploadBoxL" onclick="document.getElementById('fileL').click()">
+                    <input type="file" id="fileL" accept="image/*" capture="environment" onchange="handleFileSelect(this, 'L')">
+                    <div class="upload-content" id="uploadContentL">
+                        <div class="upload-icon">👁️</div>
+                        <div class="upload-label">ЛЯВО ОКО</div>
+                        <div class="upload-hint">Докоснете за снимка</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="options">
+                <label class="option">
+                    <input type="checkbox" id="runAI" checked>
+                    <span>🤖 AI Анализ</span>
+                </label>
+            </div>
+            
+            <button class="analyze-btn" id="analyzeBtn" onclick="analyze()" disabled>
+                🔍 АНАЛИЗИРАЙ
+            </button>
+        </div>
+        
+        <!-- Questionnaire -->
+        <div class="questionnaire">
+            <div class="questionnaire-toggle" onclick="toggleQuestionnaire()">
+                <span id="qToggleIcon">▶</span>
+                <h3>📋 Въпросник (подобрява AI анализа)</h3>
+            </div>
+            <div class="questionnaire-fields" id="questionnaireFields">
+                <div class="field-group">
+                    <label>Възраст</label>
+                    <input type="number" id="q_age" min="1" max="120" placeholder="напр. 35">
+                </div>
+                <div class="field-group">
+                    <label>Пол</label>
+                    <select id="q_gender">
+                        <option value="">-- Изберете --</option>
+                        <option value="male">Мъж</option>
+                        <option value="female">Жена</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Ниво на стрес</label>
+                    <select id="q_stress">
+                        <option value="">-- Изберете --</option>
+                        <option value="low">Ниско</option>
+                        <option value="medium">Средно</option>
+                        <option value="high">Високо</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Часове сън</label>
+                    <input type="number" id="q_sleep" min="1" max="16" placeholder="напр. 7">
+                </div>
+                <div class="field-group full-width">
+                    <label>Оплаквания / Симптоми</label>
+                    <textarea id="q_complaints" placeholder="Налични оплаквания"></textarea>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Status -->
+        <div class="status" id="status"></div>
+        
+        <!-- Results -->
+        <div class="results" id="results">
+            <!-- Right Eye Results -->
+            <div class="result-card" id="resultCardR" style="display:none;">
+                <h3>👁️ ДЯСНО ОКО (R)</h3>
+                <div class="result-images">
+                    <div class="result-img-container">
+                        <img id="overlayR" alt="Overlay">
+                        <div class="result-img-label">Детекция</div>
+                    </div>
+                    <div class="result-img-container">
+                        <img id="mapR" alt="Map">
+                        <div class="result-img-label">Ирисова карта</div>
+                    </div>
+                </div>
+                <div class="ai-section" id="aiResultsR" style="display:none;"></div>
+            </div>
+            
+            <!-- Left Eye Results -->
+            <div class="result-card" id="resultCardL" style="display:none;">
+                <h3>👁️ ЛЯВО ОКО (L)</h3>
+                <div class="result-images">
+                    <div class="result-img-container">
+                        <img id="overlayL" alt="Overlay">
+                        <div class="result-img-label">Детекция</div>
+                    </div>
+                    <div class="result-img-container">
+                        <img id="mapL" alt="Map">
+                        <div class="result-img-label">Ирисова карта</div>
+                    </div>
+                </div>
+                <div class="ai-section" id="aiResultsL" style="display:none;"></div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            Iris 3.0 - Работи изцяло в браузъра<br>
+            Снимките не се изпращат на сървър (освен при AI анализ)
+        </div>
+    </div>
+    
+    <!-- Hidden canvas for image processing -->
+    <canvas id="processingCanvas"></canvas>
+
+    <!-- Load OpenCV.js -->
+    <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" type="text/javascript"></script>
+    
+    <script>
+        // ==========================================
+        // GLOBAL STATE
+        // ==========================================
+        let cvReady = false;
+        const selectedFiles = { R: null, L: null };
+        
+        // ==========================================
+        // OPENCV INITIALIZATION
+        // ==========================================
+        function onOpenCvReady() {
+            cvReady = true;
+            document.getElementById('loadingOverlay').classList.add('hidden');
+            document.getElementById('analyzeBtn').disabled = !(selectedFiles.R || selectedFiles.L);
+            console.log('OpenCV.js is ready');
+        }
+        
+        // Handle OpenCV load error
+        function onOpenCvError() {
+            document.getElementById('loadingText').textContent = 'Грешка при зареждане на OpenCV.js. Моля презаредете страницата.';
+        }
+        
+        // ==========================================
+        // FILE HANDLING
+        // ==========================================
+        function handleFileSelect(input, side) {
+            const file = input.files[0];
+            if (!file) return;
+            
+            selectedFiles[side] = file;
+            const box = document.getElementById('uploadBox' + side);
+            const content = document.getElementById('uploadContent' + side);
+            
+            // Create preview
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                content.innerHTML = `
+                    <img src="${e.target.result}" class="preview-img" alt="Preview">
+                    <button class="remove-btn" onclick="removeFile(event, '${side}')">&times;</button>
+                `;
+                box.classList.add('has-image');
+            };
+            reader.readAsDataURL(file);
+            
+            // Enable analyze button if OpenCV is ready
+            if (cvReady) {
+                document.getElementById('analyzeBtn').disabled = false;
+            }
+        }
+        
+        function removeFile(event, side) {
+            event.stopPropagation();
+            selectedFiles[side] = null;
+            document.getElementById('file' + side).value = '';
+            
+            const box = document.getElementById('uploadBox' + side);
+            const content = document.getElementById('uploadContent' + side);
+            
+            const label = side === 'R' ? 'ДЯСНО ОКО' : 'ЛЯВО ОКО';
+            content.innerHTML = `
+                <div class="upload-icon">👁️</div>
+                <div class="upload-label">${label}</div>
+                <div class="upload-hint">Докоснете за снимка</div>
+            `;
+            box.classList.remove('has-image');
+            
+            // Disable button if no files selected
+            if (!selectedFiles.R && !selectedFiles.L) {
+                document.getElementById('analyzeBtn').disabled = true;
+            }
+        }
+        
+        // ==========================================
+        // QUESTIONNAIRE
+        // ==========================================
+        function toggleQuestionnaire() {
+            const fields = document.getElementById('questionnaireFields');
+            const icon = document.getElementById('qToggleIcon');
+            fields.classList.toggle('open');
+            icon.textContent = fields.classList.contains('open') ? '▼' : '▶';
+        }
+        
+        function getQuestionnaire() {
+            const data = {};
+            const age = document.getElementById('q_age').value;
+            const gender = document.getElementById('q_gender').value;
+            const stress = document.getElementById('q_stress').value;
+            const sleep = document.getElementById('q_sleep').value;
+            const complaints = document.getElementById('q_complaints').value;
+            
+            if (age) data.age = parseInt(age);
+            if (gender) data.gender = gender;
+            if (stress) data.stress = stress;
+            if (sleep) data.sleep = parseInt(sleep);
+            if (complaints) data.complaints = complaints;
+            
+            return Object.keys(data).length > 0 ? data : null;
+        }
+        
+        // ==========================================
+        // STATUS UPDATES
+        // ==========================================
+        function setStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type;
+        }
+        
+        // ==========================================
+        // IMAGE PROCESSING WITH OPENCV.JS
+        // ==========================================
+        
+        // Load image from file to cv.Mat
+        function loadImageFromFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const canvas = document.getElementById('processingCanvas');
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0);
+                        const mat = cv.imread(canvas);
+                        resolve(mat);
+                    };
+                    img.onerror = reject;
+                    img.src = e.target.result;
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+        
+        // Convert cv.Mat to base64 JPEG
+        function matToBase64(mat) {
+            const canvas = document.getElementById('processingCanvas');
+            cv.imshow(canvas, mat);
+            return canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+        }
+        
+        // Preprocess image (CLAHE)
+        function preprocessImage(mat) {
+            const gray = new cv.Mat();
+            cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+            
+            const clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+            const result = new cv.Mat();
+            clahe.apply(gray, result);
+            
+            gray.delete();
+            return result;
+        }
+        
+        // Find pupil using threshold and contours
+        function findPupil(grayMat) {
+            const blur = new cv.Mat();
+            // Use smaller kernel for better mobile performance (7 instead of 13)
+            cv.medianBlur(grayMat, blur, 7);
+            
+            const thresh = new cv.Mat();
+            cv.threshold(blur, thresh, 40, 255, cv.THRESH_BINARY_INV);
+            
+            const contours = new cv.MatVector();
+            const hierarchy = new cv.Mat();
+            cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            
+            let best = null;
+            let maxArea = 0;
+            
+            for (let i = 0; i < contours.size(); i++) {
+                const cnt = contours.get(i);
+                const area = cv.contourArea(cnt);
+                if (area < 50) continue;
+                
+                const circle = cv.minEnclosingCircle(cnt);
+                if (area > maxArea) {
+                    maxArea = area;
+                    best = { x: Math.round(circle.center.x), y: Math.round(circle.center.y), r: Math.round(circle.radius) };
+                }
+            }
+            
+            blur.delete();
+            thresh.delete();
+            contours.delete();
+            hierarchy.delete();
+            
+            return best;
+        }
+        
+        // Find iris outer boundary using gradient
+        function findIrisOuter(mat, px, py, pr) {
+            const gray = new cv.Mat();
+            cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+            
+            const blur = new cv.Mat();
+            cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+            
+            const edges = new cv.Mat();
+            cv.Canny(blur, edges, 30, 100);
+            
+            // Search for iris edge in radial direction
+            const minR = Math.round(pr * 1.5);
+            const maxR = Math.round(pr * 4);
+            let bestR = Math.round(pr * 2.5); // default
+            let maxEdges = 0;
+            
+            for (let r = minR; r < maxR; r += 2) {
+                let edgeCount = 0;
+                const numSamples = 72;
+                for (let i = 0; i < numSamples; i++) {
+                    const angle = (i / numSamples) * 2 * Math.PI;
+                    const x = Math.round(px + r * Math.cos(angle));
+                    const y = Math.round(py + r * Math.sin(angle));
+                    if (x >= 0 && x < edges.cols && y >= 0 && y < edges.rows) {
+                        if (edges.ucharPtr(y, x)[0] > 0) edgeCount++;
+                    }
+                }
+                if (edgeCount > maxEdges) {
+                    maxEdges = edgeCount;
+                    bestR = r;
+                }
+            }
+            
+            gray.delete();
+            blur.delete();
+            edges.delete();
+            
+            return bestR;
+        }
+        
+        // Unwrap iris to rectangular strip (polar to cartesian)
+        // Mobile-optimized: uses smaller dimensions for better performance
+        function unwrapIris(mat, px, py, pr, ir) {
+            // Detect if mobile device and use smaller output
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const outputWidth = isMobile ? 800 : 1200;
+            const outputHeight = isMobile ? 200 : 300;
+            const result = new cv.Mat(outputHeight, outputWidth, cv.CV_8UC4);
+            
+            for (let y = 0; y < outputHeight; y++) {
+                const rNorm = y / outputHeight;
+                const radius = pr + rNorm * (ir - pr);
+                
+                for (let x = 0; x < outputWidth; x++) {
+                    const angle = ((x / outputWidth) * 2 * Math.PI) - Math.PI / 2;
+                    const srcX = Math.round(px + radius * Math.cos(angle));
+                    const srcY = Math.round(py + radius * Math.sin(angle));
+                    
+                    if (srcX >= 0 && srcX < mat.cols && srcY >= 0 && srcY < mat.rows) {
+                        const srcPixel = mat.ucharPtr(srcY, srcX);
+                        const dstPixel = result.ucharPtr(y, x);
+                        dstPixel[0] = srcPixel[0];
+                        dstPixel[1] = srcPixel[1];
+                        dstPixel[2] = srcPixel[2];
+                        dstPixel[3] = 255;
+                    }
+                }
+            }
+            
+            return result;
+        }
+        
+        // Draw grid map with labels
+        function drawGridMap(unwrapped, side) {
+            const canvasWidth = 1280;
+            const canvasHeight = 390;
+            const paddingLeft = 60;
+            const paddingTop = 50;
+            const imgWidth = 1200;
+            const imgHeight = 300;
+            
+            // Create canvas
+            const canvas = document.getElementById('processingCanvas');
+            canvas.width = canvasWidth;
+            canvas.height = canvasHeight;
+            const ctx = canvas.getContext('2d');
+            
+            // Dark background
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+            
+            // Draw unwrapped image
+            cv.imshow(canvas, unwrapped);
+            const imgData = ctx.getImageData(0, 0, imgWidth, imgHeight);
+            
+            // Clear and redraw with padding
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+            ctx.putImageData(imgData, paddingLeft, paddingTop);
+            
+            // Draw grid
+            ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+            ctx.lineWidth = 1;
+            
+            // Vertical lines (minutes)
+            for (let m = 0; m <= 60; m += 5) {
+                const x = paddingLeft + (m / 60) * imgWidth;
+                ctx.beginPath();
+                ctx.moveTo(x, paddingTop);
+                ctx.lineTo(x, paddingTop + imgHeight);
+                ctx.stroke();
+            }
+            
+            // Horizontal lines (rings)
+            for (let r = 0; r <= 12; r++) {
+                const y = paddingTop + (r / 12) * imgHeight;
+                ctx.beginPath();
+                ctx.moveTo(paddingLeft, y);
+                ctx.lineTo(paddingLeft + imgWidth, y);
+                ctx.stroke();
+            }
+            
+            // Draw labels
+            ctx.fillStyle = '#00ff00';
+            ctx.font = '12px sans-serif';
+            
+            // Minute labels
+            for (let m = 0; m <= 60; m += 5) {
+                const x = paddingLeft + (m / 60) * imgWidth;
+                ctx.fillText(m.toString(), x - 5, paddingTop - 5);
+            }
+            
+            // Ring labels
+            for (let r = 0; r < 12; r++) {
+                const y = paddingTop + (r / 12) * imgHeight + 15;
+                ctx.fillText('R' + r, 5, y);
+            }
+            
+            // Eye label
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(side === 'R' ? 'RIGHT EYE' : 'LEFT EYE', paddingLeft, canvasHeight - 10);
+            
+            // Return as Mat
+            const result = cv.imread(canvas);
+            return result;
+        }
+        
+        // Draw overlay with circles
+        function drawOverlay(mat, px, py, pr, ir) {
+            const result = mat.clone();
+            const green = new cv.Scalar(0, 255, 0, 255);
+            const yellow = new cv.Scalar(0, 255, 255, 255);
+            
+            cv.circle(result, new cv.Point(px, py), pr, green, 2);
+            cv.circle(result, new cv.Point(px, py), ir, yellow, 2);
+            
+            return result;
+        }
+        
+        // Process single eye image
+        async function processEye(file, side) {
+            const mat = await loadImageFromFile(file);
+            const gray = preprocessImage(mat);
+            const pupil = findPupil(gray);
+            
+            if (!pupil) {
+                mat.delete();
+                gray.delete();
+                return { found: false, error: 'Не е открита зеница' };
+            }
+            
+            const ir = findIrisOuter(mat, pupil.x, pupil.y, pupil.r);
+            const overlay = drawOverlay(mat, pupil.x, pupil.y, pupil.r, ir);
+            const unwrapped = unwrapIris(mat, pupil.x, pupil.y, pupil.r, ir);
+            const mapped = drawGridMap(unwrapped, side);
+            
+            const overlayB64 = matToBase64(overlay);
+            const mappedB64 = matToBase64(mapped);
+            
+            // Clean up
+            mat.delete();
+            gray.delete();
+            overlay.delete();
+            unwrapped.delete();
+            mapped.delete();
+            
+            return {
+                found: true,
+                overlay: overlayB64,
+                mapped: mappedB64
+            };
+        }
+        
+        // Validate worker URL - must be HTTPS
+        function isValidWorkerUrl(url) {
+            if (!url) return false;
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        }
+        
+        // ==========================================
+        // AI ANALYSIS (CLOUDFLARE WORKER)
+        // ==========================================
+        async function callWorkerAnalysis(stripB64, side, questionnaire) {
+            const workerUrl = document.getElementById('workerUrl').value.trim();
+            if (!workerUrl) return null;
+            
+            // Validate URL for security
+            if (!isValidWorkerUrl(workerUrl)) {
+                return { error: 'Невалиден Worker URL. Трябва да започва с https://' };
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append('strip_image', stripB64);
+                formData.append('side', side);
+                if (questionnaire) {
+                    formData.append('questionnaire', JSON.stringify(questionnaire));
+                }
+                
+                const response = await fetch(workerUrl + '/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    return await response.json();
+                } else {
+                    return { error: 'AI сървър грешка: ' + response.status };
+                }
+            } catch (e) {
+                return { error: 'Връзка с AI сървъра неуспешна: ' + e.message };
+            }
+        }
+        
+        // Render AI results
+        function renderAIResults(container, analysis) {
+            if (!analysis || analysis.error) {
+                container.innerHTML = `<p style="color: var(--danger);">⚠️ ${analysis?.error || 'Грешка при AI анализа'}</p>`;
+                container.style.display = 'block';
+                return;
+            }
+            
+            let html = '';
+            
+            // Summary
+            if (analysis.summary) {
+                html += `
+                    <h4>📝 Обобщение</h4>
+                    <div class="report-text">${escapeHtml(analysis.summary)}</div>
+                `;
+            }
+            
+            // Findings
+            if (analysis.findings && analysis.findings.length > 0) {
+                html += `
+                    <h4>🔍 Находки (${analysis.findings.length})</h4>
+                    <div class="findings-grid">
+                `;
+                analysis.findings.forEach(f => {
+                    const status = f.severity === 'high' ? 'concern' : (f.severity === 'medium' ? 'attention' : 'normal');
+                    html += `
+                        <div class="finding-card ${status}">
+                            <strong>${escapeHtml(f.type || 'Находка')}</strong>
+                            <div style="font-size:0.8rem;color:var(--text-muted)">${escapeHtml(f.location || '')}</div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+            }
+            
+            // Full report
+            if (analysis.report) {
+                html += `
+                    <h4>📄 Пълен доклад</h4>
+                    <div class="report-text">${escapeHtml(analysis.report)}</div>
+                `;
+            }
+            
+            container.innerHTML = html || '<p>Няма допълнителна информация от AI анализа.</p>';
+            container.style.display = 'block';
+        }
+        
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // ==========================================
+        // MAIN ANALYSIS FUNCTION
+        // ==========================================
+        async function analyze() {
+            if (!cvReady) {
+                alert('OpenCV.js все още се зарежда. Моля изчакайте.');
+                return;
+            }
+            
+            if (!selectedFiles.R && !selectedFiles.L) {
+                alert('Моля изберете поне една снимка!');
+                return;
+            }
+            
+            const btn = document.getElementById('analyzeBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Обработка...';
+            
+            const runAI = document.getElementById('runAI').checked;
+            const workerUrl = document.getElementById('workerUrl').value.trim();
+            const questionnaire = getQuestionnaire();
+            
+            setStatus('Обработка на изображенията...', 'processing');
+            document.getElementById('results').classList.add('visible');
+            
+            try {
+                // Process Right Eye
+                if (selectedFiles.R) {
+                    setStatus('Обработка на дясно око...', 'processing');
+                    const resultR = await processEye(selectedFiles.R, 'R');
+                    
+                    const cardR = document.getElementById('resultCardR');
+                    if (resultR.found) {
+                        document.getElementById('overlayR').src = 'data:image/jpeg;base64,' + resultR.overlay;
+                        document.getElementById('mapR').src = 'data:image/jpeg;base64,' + resultR.mapped;
+                        cardR.style.display = 'block';
+                        
+                        // AI Analysis
+                        if (runAI && workerUrl) {
+                            setStatus('AI анализ на дясно око...', 'processing');
+                            const aiResult = await callWorkerAnalysis(resultR.mapped, 'R', questionnaire);
+                            renderAIResults(document.getElementById('aiResultsR'), aiResult);
+                        }
+                    } else {
+                        cardR.innerHTML = `<h3>👁️ ДЯСНО ОКО (R)</h3><p style="color:var(--danger)">⚠️ ${resultR.error}</p>`;
+                        cardR.style.display = 'block';
+                    }
+                }
+                
+                // Process Left Eye
+                if (selectedFiles.L) {
+                    setStatus('Обработка на ляво око...', 'processing');
+                    const resultL = await processEye(selectedFiles.L, 'L');
+                    
+                    const cardL = document.getElementById('resultCardL');
+                    if (resultL.found) {
+                        document.getElementById('overlayL').src = 'data:image/jpeg;base64,' + resultL.overlay;
+                        document.getElementById('mapL').src = 'data:image/jpeg;base64,' + resultL.mapped;
+                        cardL.style.display = 'block';
+                        
+                        // AI Analysis
+                        if (runAI && workerUrl) {
+                            setStatus('AI анализ на ляво око...', 'processing');
+                            const aiResult = await callWorkerAnalysis(resultL.mapped, 'L', questionnaire);
+                            renderAIResults(document.getElementById('aiResultsL'), aiResult);
+                        }
+                    } else {
+                        cardL.innerHTML = `<h3>👁️ ЛЯВО ОКО (L)</h3><p style="color:var(--danger)">⚠️ ${resultL.error}</p>`;
+                        cardL.style.display = 'block';
+                    }
+                }
+                
+                setStatus('✅ Анализът е завършен!', 'success');
+                
+            } catch (e) {
+                console.error(e);
+                setStatus('❌ Грешка: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔍 АНАЛИЗИРАЙ';
+            }
+        }
+        
+        // ==========================================
+        // INITIALIZATION
+        // ==========================================
+        
+        // Load saved worker URL from localStorage
+        document.addEventListener('DOMContentLoaded', function() {
+            const savedUrl = localStorage.getItem('irisWorkerUrl');
+            if (savedUrl) {
+                document.getElementById('workerUrl').value = savedUrl;
+            }
+            
+            // Save worker URL on change
+            document.getElementById('workerUrl').addEventListener('change', function() {
+                localStorage.setItem('irisWorkerUrl', this.value);
+            });
+        });
+        
+        // Drag and drop support
+        ['R', 'L'].forEach(side => {
+            const box = document.getElementById('uploadBox' + side);
+            
+            box.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                box.classList.add('dragover');
+            });
+            
+            box.addEventListener('dragleave', () => {
+                box.classList.remove('dragover');
+            });
+            
+            box.addEventListener('drop', (e) => {
+                e.preventDefault();
+                box.classList.remove('dragover');
+                const file = e.dataTransfer.files[0];
+                if (file && file.type.startsWith('image/')) {
+                    const input = document.getElementById('file' + side);
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    input.files = dt.files;
+                    handleFileSelect(input, side);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

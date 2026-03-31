@@ -1,10 +1,18 @@
 import os
+import json
 import cv2
 import numpy as np
 import base64
+import hashlib
+import requests
 from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
+
+# Cloudflare Worker URL for AI analysis - can be overridden via env variable
+WORKER_URL = os.environ.get('IRIS_WORKER_URL', '')
+# Optional: Set timeout for worker requests (in seconds)
+WORKER_TIMEOUT = int(os.environ.get('IRIS_WORKER_TIMEOUT', '120'))
 
 # ==========================================
 # 1. PREPROCESSING
@@ -346,15 +354,77 @@ def draw_overlay(img, px, py, pr, ir):
     return out
 
 # ==========================================
-# 7. FLASK APP
+# 7. HELPER: Call Cloudflare Worker for AI analysis
+# ==========================================
+def call_worker_analysis(strip_b64, side, questionnaire=None):
+    """
+    Call the Cloudflare Worker to analyze the unwrapped iris strip.
+    Returns the AI analysis result or None if worker is not configured.
+    """
+    if not WORKER_URL:
+        return None
+
+    try:
+        # Generate image hash for caching
+        image_hash = hashlib.sha256(strip_b64.encode()).hexdigest()[:12]
+
+        # Prepare form data
+        data = {
+            'strip_image': strip_b64,
+            'side': side,
+            'image_hash': image_hash,
+        }
+        if questionnaire:
+            data['questionnaire'] = json.dumps(questionnaire)
+
+        # Call the worker
+        response = requests.post(
+            f"{WORKER_URL}/analyze",
+            data=data,
+            timeout=WORKER_TIMEOUT
+        )
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            # Sanitize error message - don't expose raw response details
+            return {'error': f'AI analysis service error (status {response.status_code})'}
+
+    except requests.exceptions.Timeout:
+        return {'error': 'AI analysis timed out. Please try again.'}
+    except requests.exceptions.ConnectionError:
+        return {'error': 'Cannot connect to AI analysis service.'}
+    except Exception:
+        return {'error': 'AI analysis encountered an unexpected error.'}
+
+
+# ==========================================
+# 8. FLASK APP
 # ==========================================
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/process', methods=['POST'])
 def process():
+    """
+    Process uploaded iris images: detect pupil/iris, unwrap, and optionally
+    send to Cloudflare Worker for AI analysis.
+    """
     results = {}
+
+    # Parse optional questionnaire from request
+    questionnaire = None
+    q_raw = request.form.get('questionnaire')
+    if q_raw:
+        try:
+            questionnaire = json.loads(q_raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Check if AI analysis is requested
+    run_ai = request.form.get('run_ai', 'false').lower() == 'true'
 
     for sc, key in [('R', 'image_right'), ('L', 'image_left')]:
         f = request.files.get(key)
@@ -373,12 +443,12 @@ def process():
             px, py, pr = pupil
             ir = find_iris_outer_boundary(img, px, py, pr)
 
-            # НОВА МАСКА ЗА КЛЕПАЧИ
+            # Eyelid masking with RANSAC
             mask = segment_eyelids_ransac(img, px, py, ir, band_frac=0.35, max_cut_frac=0.25)
 
             ovl = draw_overlay(img, px, py, pr, ir)
 
-            # Unwrap image
+            # Unwrap image (polar to rectangular)
             unw = unwrap_iris_fast(img, px, py, pr, ir)
 
             # Unwrap mask
@@ -389,16 +459,63 @@ def process():
             gray_m = cv2.cvtColor(unw_mask, cv2.COLOR_BGR2GRAY)
             unw[gray_m < 100] = (255, 255, 255)
 
+            # Draw the grid map with coordinate labels
             mapped = draw_ai_grid_map_expanded(unw, side=sc)
 
+            # Encode images to base64
             b_ovl = base64.b64encode(cv2.imencode('.jpg', ovl)[1]).decode()
             b_map = base64.b64encode(cv2.imencode('.jpg', mapped)[1]).decode()
 
-            results[sc] = {'found': True, 'overlay': b_ovl, 'mapped': b_map}
+            result = {
+                'found': True,
+                'overlay': b_ovl,
+                'mapped': b_map,
+            }
+
+            # Run AI analysis if requested and worker is configured
+            if run_ai and WORKER_URL:
+                ai_result = call_worker_analysis(b_map, sc, questionnaire)
+                if ai_result:
+                    result['ai_analysis'] = ai_result
+
+            results[sc] = result
         else:
             results[sc] = {'found': False, 'error': 'Pupil not found'}
 
+    # Include worker status in response
+    results['worker_configured'] = bool(WORKER_URL)
+
     return jsonify(results)
+
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    """
+    Standalone endpoint to trigger AI analysis on already-processed images.
+    Expects: strip_image (base64), side (R/L), questionnaire (optional JSON)
+    """
+    if not WORKER_URL:
+        return jsonify({'error': 'AI analysis worker not configured. Set IRIS_WORKER_URL environment variable.'}), 503
+
+    strip_b64 = request.form.get('strip_image')
+    side = request.form.get('side', 'R').upper()
+
+    if not strip_b64:
+        return jsonify({'error': 'strip_image is required'}), 400
+    if side not in ('R', 'L'):
+        return jsonify({'error': 'side must be R or L'}), 400
+
+    questionnaire = None
+    q_raw = request.form.get('questionnaire')
+    if q_raw:
+        try:
+            questionnaire = json.loads(q_raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    result = call_worker_analysis(strip_b64, side, questionnaire)
+    return jsonify(result)
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
