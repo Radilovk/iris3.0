@@ -7,10 +7,12 @@
  *   2. GET  /result/:side/:hash — retrieve a cached analysis result
  *
  * Environment bindings (set in wrangler.toml / Cloudflare dashboard):
- *   IRIS_KV      — KV namespace for caching results
- *   AI_API_KEY   — secret: OpenAI-compatible API key
- *   AI_MODEL     — var: model name, e.g. "gpt-4o"  (default: "gpt-4o")
- *   AI_BASE_URL  — var: API base URL (default: "https://api.openai.com/v1")
+ *   IRIS_KV         — KV namespace for caching results
+ *   AI_API_KEY      — secret: API key (OpenAI or Google Gemini)
+ *   AI_PROVIDER     — var: provider name ("openai", "gemini", "openai-compatible")
+ *   AI_MODEL        — var: model name (e.g., "gemini-2.0-flash-exp", "gpt-4o", "gpt-4o-mini")
+ *   AI_BASE_URL     — var: OpenAI API base URL (default: "https://api.openai.com/v1")
+ *   GEMINI_API_URL  — var: Gemini API base URL (default: "https://generativelanguage.googleapis.com/v1beta")
  *
  * Request format (POST /analyze, multipart/form-data):
  *   strip_image   — base64-encoded JPEG of the unwrapped iris strip (from app.py)
@@ -176,9 +178,23 @@ class IrisPipeline {
 }
 
 // =====================================================================
-// AI CALL — OpenAI-compatible vision/text endpoint
+// AI CALL — Multi-provider vision/text endpoint (OpenAI, Gemini)
 // =====================================================================
 async function aiCall(env, prompt, imageDataUrl) {
+  const provider = (env.AI_PROVIDER || 'openai').toLowerCase();
+  
+  if (provider === 'gemini') {
+    return await aiCallGemini(env, prompt, imageDataUrl);
+  } else {
+    // Default to OpenAI-compatible API
+    return await aiCallOpenAI(env, prompt, imageDataUrl);
+  }
+}
+
+// =====================================================================
+// OpenAI-compatible API call
+// =====================================================================
+async function aiCallOpenAI(env, prompt, imageDataUrl) {
   const model   = env.AI_MODEL   || 'gpt-4o';
   const baseUrl = env.AI_BASE_URL || 'https://api.openai.com/v1';
 
@@ -220,6 +236,70 @@ async function aiCall(env, prompt, imageDataUrl) {
   const content = data?.choices?.[0]?.message?.content;
   if (!content) {
     return { error: { code: 'EMPTY_RESPONSE', message: 'AI returned no content' } };
+  }
+
+  return safeParseJSON(content) || { error: { code: 'JSON_PARSE_ERROR', raw: content.slice(0, ERR_MSG_LIMIT) } };
+}
+
+// =====================================================================
+// Google Gemini API call
+// =====================================================================
+async function aiCallGemini(env, prompt, imageDataUrl) {
+  const model = env.AI_MODEL || 'gemini-2.0-flash-exp';
+  const baseUrl = env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta';
+  
+  // Prepare content parts
+  const parts = [{ text: prompt }];
+  
+  // If image provided, convert data URL to inline data format for Gemini
+  if (imageDataUrl) {
+    // Extract base64 data and MIME type from data URL
+    const matches = imageDataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+    if (matches) {
+      const mimeType = matches[1];
+      const base64Data = matches[2];
+      parts.push({
+        inline_data: {
+          mime_type: mimeType,
+          data: base64Data
+        }
+      });
+    }
+  }
+  
+  const body = {
+    contents: [{
+      parts: parts
+    }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 4096,
+      responseMimeType: 'application/json'
+    }
+  };
+
+  let resp;
+  try {
+    resp = await fetch(`${baseUrl}/models/${model}:generateContent?key=${env.AI_API_KEY}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    return { error: { code: 'NETWORK_ERROR', message: (err?.message || String(err)).slice(0, ERR_MSG_LIMIT) } };
+  }
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => resp.statusText);
+    return { error: { code: 'API_HTTP_ERROR', status: resp.status, message: errText.slice(0, ERR_MSG_LIMIT) } };
+  }
+
+  const data = await resp.json().catch(() => null);
+  const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!content) {
+    return { error: { code: 'EMPTY_RESPONSE', message: 'Gemini returned no content' } };
   }
 
   return safeParseJSON(content) || { error: { code: 'JSON_PARSE_ERROR', raw: content.slice(0, ERR_MSG_LIMIT) } };

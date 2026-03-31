@@ -14,19 +14,35 @@ binding    = "IRIS_KV"
 id         = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
 
-# ─── Environment Variables ───────────────────────────────────────────────────────
+# ─── Environment Variables ───────────────────────────────────────────────────
 [vars]
+# AI provider: "openai", "gemini", or "openai-compatible"
+AI_PROVIDER = "gemini"
+
 # AI model to use (must support vision for STEP1, STEP2A, STEP2B)
-AI_MODEL    = "gpt-4o"
-# OpenAI-compatible API base URL. Change to use a different provider, e.g.:
-#   Anthropic Claude via their OpenAI-compatible proxy
+# OpenAI options:
+#   "gpt-4o"      — Premium flagship model ($2.50-5/M input, best vision & reasoning)
+#   "gpt-4o-mini" — Cost-effective ($0.15/M input, 15-25x cheaper, strong vision)
+# Gemini options (recommended for 2026):
+#   "gemini-2.0-flash-exp"     — Latest experimental (free tier available)
+#   "gemini-2.5-flash-latest"  — Production-ready, native multimodal, 1M context
+#   "gemini-1.5-pro-latest"    — Stable fallback
+AI_MODEL    = "gemini-2.0-flash-exp"
+
+# API base URLs (used based on AI_PROVIDER):
+# OpenAI:
+AI_BASE_URL = "https://api.openai.com/v1"
+# Gemini:
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
+# For openai-compatible providers (e.g., Anthropic, Azure, Ollama):
 #   Azure OpenAI: "https://<resource>.openai.azure.com/openai/deployments/<deploy>/v1"
 #   Local Ollama:  "http://localhost:11434/v1"
-AI_BASE_URL = "https://api.openai.com/v1"
 
 # ─── Secrets (set via CLI, never commit to source control) ───────────────────────
 # Run: wrangler secret put AI_API_KEY
-# Then paste your OpenAI (or compatible) API key when prompted.
+# Then paste your API key when prompted:
+#   - For OpenAI: Get from https://platform.openai.com/api-keys
+#   - For Gemini: Get from https://aistudio.google.com/app/apikey
 # The secret is available in the worker as env.AI_API_KEY
 
 # ─── Quick-start instructions ────────────────────────────────────────────────────
