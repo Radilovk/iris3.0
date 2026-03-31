@@ -415,11 +415,11 @@
         <div class="controls">
             <div class="controls-row">
                 <div class="file-group">
-                    <label>📷 ДЯСНО ОКО (Right):</label>
+                    <label>📷 ДЯСНО ОКО (Right): <small style="color:var(--text-muted)">(макс. 10 MB)</small></label>
                     <input type="file" id="fileR" accept="image/*">
                 </div>
                 <div class="file-group">
-                    <label>📷 ЛЯВО ОКО (Left):</label>
+                    <label>📷 ЛЯВО ОКО (Left): <small style="color:var(--text-muted)">(макс. 10 MB)</small></label>
                     <input type="file" id="fileL" accept="image/*">
                 </div>
                 <div>
@@ -430,6 +430,36 @@
                     <button class="btn btn-success" id="analyzeBtn" onclick="analyze()">
                         АНАЛИЗИРАЙ
                     </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- AI Model Selection Section -->
+        <div class="questionnaire" style="margin-bottom: 20px;">
+            <div class="questionnaire-toggle" onclick="toggleModelConfig()">
+                <span id="modelToggleIcon">▶</span>
+                <h3>🤖 AI Модел (по желание)</h3>
+            </div>
+            <div class="questionnaire-fields" id="modelConfigFields">
+                <div class="field-group">
+                    <label>Доставчик</label>
+                    <select id="aiProvider" onchange="updateModelList()">
+                        <option value="">-- По подразбиране (от сървъра) --</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="openai-compatible">OpenAI-съвместим</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Модел</label>
+                    <select id="aiModel">
+                        <option value="">-- По подразбиране --</option>
+                    </select>
+                </div>
+                <div class="field-group full-width">
+                    <label>Или въведете ръчно име на модел</label>
+                    <input type="text" id="customModel" placeholder="напр. gemini-2.5-flash-latest, gpt-4o, claude-3-opus">
+                    <small style="color:var(--text-muted)">Ръчно въведеният модел има приоритет над избрания от списъка</small>
                 </div>
             </div>
         </div>
@@ -564,6 +594,84 @@
     </div>
 
     <script>
+        // AI Model configurations
+        const AI_MODELS = {
+            gemini: [
+                { value: 'gemini-2.0-flash-exp', label: 'Gemini 2.0 Flash Exp (препоръчан)' },
+                { value: 'gemini-2.5-flash-latest', label: 'Gemini 2.5 Flash Latest' },
+                { value: 'gemini-1.5-pro-latest', label: 'Gemini 1.5 Pro Latest' },
+                { value: 'gemini-1.5-flash-latest', label: 'Gemini 1.5 Flash Latest' },
+                { value: 'gemini-pro-vision', label: 'Gemini Pro Vision' }
+            ],
+            openai: [
+                { value: 'gpt-4o', label: 'GPT-4o (флагман)' },
+                { value: 'gpt-4o-mini', label: 'GPT-4o Mini (по-евтин)' },
+                { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
+                { value: 'gpt-4-vision-preview', label: 'GPT-4 Vision Preview' },
+                { value: 'o1-preview', label: 'O1 Preview (reasoning)' }
+            ],
+            'openai-compatible': [
+                { value: 'claude-3-opus-20240229', label: 'Claude 3 Opus' },
+                { value: 'claude-3-sonnet-20240229', label: 'Claude 3 Sonnet' },
+                { value: 'claude-3-haiku-20240307', label: 'Claude 3 Haiku' },
+                { value: 'llava-v1.6-34b', label: 'LLaVA v1.6 34B (локален)' },
+                { value: 'mistral-large-latest', label: 'Mistral Large' }
+            ]
+        };
+        
+        // Maximum file size: 10 MB
+        const MAX_FILE_SIZE_MB = 10;
+        const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+        
+        // Update model dropdown based on provider selection
+        function updateModelList() {
+            const provider = document.getElementById('aiProvider').value;
+            const modelSelect = document.getElementById('aiModel');
+            
+            modelSelect.innerHTML = '<option value="">-- По подразбиране --</option>';
+            
+            if (provider && AI_MODELS[provider]) {
+                AI_MODELS[provider].forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.value;
+                    option.textContent = model.label;
+                    modelSelect.appendChild(option);
+                });
+            }
+        }
+        
+        // Toggle model config visibility
+        function toggleModelConfig() {
+            const fields = document.getElementById('modelConfigFields');
+            const icon = document.getElementById('modelToggleIcon');
+            fields.classList.toggle('open');
+            icon.textContent = fields.classList.contains('open') ? '▼' : '▶';
+        }
+        
+        /**
+         * Get the selected AI model configuration.
+         * Model precedence (highest to lowest):
+         *   1. Custom model text input (if not empty)
+         *   2. Model dropdown selection
+         *   3. Server default (if both are empty)
+         */
+        function getModelConfig() {
+            const provider = document.getElementById('aiProvider').value;
+            // Custom model takes precedence over dropdown selection
+            const model = document.getElementById('customModel').value.trim() || 
+                         document.getElementById('aiModel').value;
+            return { provider, model };
+        }
+        
+        // Validate file size
+        function validateFileSize(file) {
+            if (file && file.size > MAX_FILE_SIZE_BYTES) {
+                alert(`Файлът е твърде голям (${(file.size / 1024 / 1024).toFixed(1)} MB).\nМаксимален размер: ${MAX_FILE_SIZE_MB} MB`);
+                return false;
+            }
+            return true;
+        }
+        
         // Toggle questionnaire visibility
         function toggleQuestionnaire() {
             const fields = document.getElementById('questionnaireFields');
@@ -835,8 +943,19 @@
                 return;
             }
             
+            // Validate file sizes
+            if (fR && !validateFileSize(fR)) {
+                document.getElementById('fileR').value = '';
+                return;
+            }
+            if (fL && !validateFileSize(fL)) {
+                document.getElementById('fileL').value = '';
+                return;
+            }
+            
             const runAI = document.getElementById('runAI').checked;
             const questionnaire = getQuestionnaire();
+            const modelConfig = getModelConfig();
             
             // Prepare form data
             const fd = new FormData();
@@ -847,12 +966,21 @@
                 fd.append('questionnaire', JSON.stringify(questionnaire));
             }
             
+            // Add AI model configuration if specified
+            if (modelConfig.provider) {
+                fd.append('ai_provider', modelConfig.provider);
+            }
+            if (modelConfig.model) {
+                fd.append('ai_model', modelConfig.model);
+            }
+            
             // Update UI
             const btn = document.getElementById('analyzeBtn');
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span>Анализиране...';
             
-            setStatus(runAI ? 'Обработка на изображенията и AI анализ... (може да отнеме до 2 минути)' : 'Обработка на изображенията...', 'processing');
+            const modelInfo = modelConfig.model ? ` (модел: ${modelConfig.model})` : '';
+            setStatus(runAI ? `Обработка на изображенията и AI анализ${modelInfo}... (може да отнеме до 2 минути)` : 'Обработка на изображенията...', 'processing');
             
             // Hide previous results
             ['R', 'L'].forEach(side => {

@@ -9,10 +9,21 @@ from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
 
+# ==========================================
+# CONFIGURATION
+# ==========================================
+
+# Maximum file size: 10 MB
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB
+
 # Cloudflare Worker URL for AI analysis - can be overridden via env variable
 WORKER_URL = os.environ.get('IRIS_WORKER_URL', '')
 # Optional: Set timeout for worker requests (in seconds)
 WORKER_TIMEOUT = int(os.environ.get('IRIS_WORKER_TIMEOUT', '120'))
+
+# Default AI configuration (can be overridden per-request)
+DEFAULT_AI_PROVIDER = os.environ.get('AI_PROVIDER', '')
+DEFAULT_AI_MODEL = os.environ.get('AI_MODEL', '')
 
 # ==========================================
 # 1. PREPROCESSING
@@ -356,10 +367,17 @@ def draw_overlay(img, px, py, pr, ir):
 # ==========================================
 # 7. HELPER: Call Cloudflare Worker for AI analysis
 # ==========================================
-def call_worker_analysis(strip_b64, side, questionnaire=None):
+def call_worker_analysis(strip_b64, side, questionnaire=None, ai_provider=None, ai_model=None):
     """
     Call the Cloudflare Worker to analyze the unwrapped iris strip.
     Returns the AI analysis result or None if worker is not configured.
+    
+    Args:
+        strip_b64: Base64-encoded JPEG of the unwrapped iris strip
+        side: 'R' or 'L' for right or left eye
+        questionnaire: Optional dict with patient data
+        ai_provider: Optional AI provider override ('gemini', 'openai', 'openai-compatible')
+        ai_model: Optional AI model name override
     """
     if not WORKER_URL:
         return None
@@ -376,6 +394,12 @@ def call_worker_analysis(strip_b64, side, questionnaire=None):
         }
         if questionnaire:
             data['questionnaire'] = json.dumps(questionnaire)
+        
+        # Add AI model configuration if provided
+        if ai_provider or DEFAULT_AI_PROVIDER:
+            data['ai_provider'] = ai_provider or DEFAULT_AI_PROVIDER
+        if ai_model or DEFAULT_AI_MODEL:
+            data['ai_model'] = ai_model or DEFAULT_AI_MODEL
 
         # Call the worker
         response = requests.post(
@@ -411,6 +435,9 @@ def process():
     """
     Process uploaded iris images: detect pupil/iris, unwrap, and optionally
     send to Cloudflare Worker for AI analysis.
+    
+    Supports images up to 10 MB in size. Large images are automatically handled.
+    AI model can be specified via ai_provider and ai_model parameters.
     """
     results = {}
 
@@ -425,6 +452,10 @@ def process():
 
     # Check if AI analysis is requested
     run_ai = request.form.get('run_ai', 'false').lower() == 'true'
+    
+    # Get optional AI model configuration
+    ai_provider = request.form.get('ai_provider')
+    ai_model = request.form.get('ai_model')
 
     for sc, key in [('R', 'image_right'), ('L', 'image_left')]:
         f = request.files.get(key)
@@ -435,6 +466,14 @@ def process():
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
             continue
+        
+        # Handle large images by resizing if necessary (max 4000px on any side)
+        max_dimension = 4000
+        h, w = img.shape[:2]
+        if h > max_dimension or w > max_dimension:
+            scale = min(max_dimension / w, max_dimension / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         proc = preprocess_image(img)
         pupil = find_pupil(proc)
@@ -474,7 +513,7 @@ def process():
 
             # Run AI analysis if requested and worker is configured
             if run_ai and WORKER_URL:
-                ai_result = call_worker_analysis(b_map, sc, questionnaire)
+                ai_result = call_worker_analysis(b_map, sc, questionnaire, ai_provider, ai_model)
                 if ai_result:
                     result['ai_analysis'] = ai_result
 
@@ -493,6 +532,7 @@ def analyze():
     """
     Standalone endpoint to trigger AI analysis on already-processed images.
     Expects: strip_image (base64), side (R/L), questionnaire (optional JSON)
+    Optional: ai_provider, ai_model for model selection
     """
     if not WORKER_URL:
         return jsonify({'error': 'AI analysis worker not configured. Set IRIS_WORKER_URL environment variable.'}), 503
@@ -512,8 +552,12 @@ def analyze():
             questionnaire = json.loads(q_raw)
         except (json.JSONDecodeError, TypeError):
             pass
+    
+    # Get optional AI model configuration
+    ai_provider = request.form.get('ai_provider')
+    ai_model = request.form.get('ai_model')
 
-    result = call_worker_analysis(strip_b64, side, questionnaire)
+    result = call_worker_analysis(strip_b64, side, questionnaire, ai_provider, ai_model)
     return jsonify(result)
 
 

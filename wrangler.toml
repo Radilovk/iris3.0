@@ -16,17 +16,32 @@ preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
 
 # ─── Environment Variables ───────────────────────────────────────────────────
 [vars]
-# AI provider: "openai", "gemini", or "openai-compatible"
+# DEFAULT AI provider: "openai", "gemini", or "openai-compatible"
+# This can be overridden per-request via the ai_provider form field
 AI_PROVIDER = "gemini"
 
-# AI model to use (must support vision for STEP1, STEP2A, STEP2B)
+# DEFAULT AI model to use (must support vision for STEP1, STEP2A, STEP2B)
+# This can be overridden per-request via the ai_model form field
+#
 # OpenAI options:
 #   "gpt-4o"      — Premium flagship model ($2.50-5/M input, best vision & reasoning)
 #   "gpt-4o-mini" — Cost-effective ($0.15/M input, 15-25x cheaper, strong vision)
+#   "gpt-4-turbo" — Previous flagship with vision
+#   "o1-preview"  — Advanced reasoning model (no vision support)
+#
 # Gemini options (recommended for 2026):
 #   "gemini-2.0-flash-exp"     — Latest experimental (free tier available)
 #   "gemini-2.5-flash-latest"  — Production-ready, native multimodal, 1M context
 #   "gemini-1.5-pro-latest"    — Stable fallback
+#   "gemini-1.5-flash-latest"  — Fast and efficient
+#   "gemini-pro-vision"        — Classic vision model
+#
+# OpenAI-compatible options (for Claude, Ollama, etc.):
+#   "claude-3-opus-20240229"   — Claude 3 Opus (via Anthropic API)
+#   "claude-3-sonnet-20240229" — Claude 3 Sonnet
+#   "claude-3-haiku-20240307"  — Claude 3 Haiku (fast)
+#   "llava-v1.6-34b"           — Local LLaVA model (via Ollama)
+#
 AI_MODEL    = "gemini-2.0-flash-exp"
 
 # API base URLs (used based on AI_PROVIDER):
@@ -53,13 +68,23 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 # 4. Set API key secret:     wrangler secret put AI_API_KEY
 # 5. Deploy:                 wrangler deploy
 #
-# Usage after deploy:
-#   POST https://<worker-subdomain>.workers.dev/analyze
+# ─── API Endpoints ───────────────────────────────────────────────────────────────
+#
+#   POST /analyze
+#     Analyze an unwrapped iris strip image.
 #     Form fields:
 #       strip_image   — base64 JPEG from app.py (/process endpoint, "mapped" field)
 #       side          — "R" or "L"
 #       image_hash    — optional unique ID (auto-generated if omitted)
 #       questionnaire — optional JSON: {"age":30,"gender":"female","complaints":"..."}
+#       ai_provider   — optional: override default provider ("gemini", "openai", "openai-compatible")
+#       ai_model      — optional: override default model (e.g., "gpt-4o", "gemini-2.5-flash-latest")
 #
-#   GET https://<worker-subdomain>.workers.dev/result/<side>:<hash>
+#   GET /result/<side>:<hash>
 #     Retrieves a cached analysis (24-hour TTL).
+#
+#   GET /models
+#     Lists available AI providers and models.
+#
+#   GET /health
+#     Health check endpoint (returns config status).
