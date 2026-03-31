@@ -192,14 +192,58 @@ wrangler deploy
 
 ## 🔧 Конфигурация
 
+### AI Модели (Актуализация 2026)
+
+Системата поддържа множество AI провайдери с най-нови модели:
+
+#### 🎯 Препоръчан: Google Gemini 2.0 Flash
+- **Модел:** `gemini-2.0-flash-exp` (експериментален) или `gemini-2.5-flash-latest` (стабилен)
+- **Предимства:**
+  - 1 милион токена контекст (срещу 128K)
+  - До 3000 изображения на запитване
+  - По-бърза обработка
+  - По-ниска цена
+  - Безплатен tier за тестване
+- **API ключ:** https://aistudio.google.com/app/apikey
+
+#### 💰 Икономичен: OpenAI GPT-4o-mini
+- **Модел:** `gpt-4o-mini`
+- **Предимства:**
+  - 15-25x по-евтин от GPT-4o
+  - Силни vision възможности
+  - Добър за големи обеми обработка
+
+#### 🏆 Премиум: OpenAI GPT-4o
+- **Модел:** `gpt-4o`
+- **Предимства:**
+  - Отлични vision и reasoning способности
+  - Най-високо качество на анализа
+
+### Конфигурация в wrangler.toml
+
+```toml
+[vars]
+# Избор на провайдер: "openai", "gemini", или "openai-compatible"
+AI_PROVIDER = "gemini"
+
+# Модел (препоръчан: gemini-2.0-flash-exp)
+AI_MODEL = "gemini-2.0-flash-exp"
+
+# API URLs
+AI_BASE_URL = "https://api.openai.com/v1"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
+```
+
 ### Променливи на средата
 
 | Променлива | Описание | По подразбиране |
 |------------|----------|-----------------|
 | `IRIS_WORKER_URL` | URL на Cloudflare Worker | (празно) |
 | `IRIS_WORKER_TIMEOUT` | Timeout в секунди | 120 |
-| `AI_MODEL` | AI модел | gpt-4o |
-| `AI_BASE_URL` | API endpoint | https://api.openai.com/v1 |
+| `AI_PROVIDER` | AI провайдер | gemini |
+| `AI_MODEL` | AI модел | gemini-2.0-flash-exp |
+| `AI_BASE_URL` | OpenAI API endpoint | https://api.openai.com/v1 |
+| `GEMINI_API_URL` | Gemini API endpoint | https://generativelanguage.googleapis.com/v1beta |
 
 ## 📄 Лиценз
 
