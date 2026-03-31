@@ -154,6 +154,16 @@
             line-height: 1;
             z-index: 10;
         }
+        .file-size-badge {
+            position: absolute;
+            bottom: 5px;
+            left: 5px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            color: var(--text);
+        }
         
         /* Camera button for mobile */
         .camera-btn {
@@ -651,8 +661,16 @@
             saveModelConfig();
         }
         
+        /**
+         * Get the selected AI model configuration.
+         * Model precedence (highest to lowest):
+         *   1. Custom model text input (if not empty)
+         *   2. Model dropdown selection
+         *   3. Server default (if both are empty)
+         */
         function getSelectedModelConfig() {
             const provider = document.getElementById('aiProvider').value;
+            // Custom model takes precedence over dropdown selection
             const model = document.getElementById('customModel').value.trim() || 
                          document.getElementById('aiModel').value;
             
@@ -735,7 +753,7 @@
                 content.innerHTML = `
                     <img src="${e.target.result}" class="preview-img" alt="Preview">
                     <button class="remove-btn" onclick="removeFile(event, '${side}')">&times;</button>
-                    <div class="file-size-badge" style="position:absolute;bottom:5px;left:5px;background:rgba(0,0,0,0.7);padding:2px 6px;border-radius:4px;font-size:0.7rem;">${formatFileSize(file.size)}</div>
+                    <div class="file-size-badge">${formatFileSize(file.size)}</div>
                 `;
                 box.classList.add('has-image');
             };

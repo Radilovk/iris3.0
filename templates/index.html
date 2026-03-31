@@ -648,9 +648,16 @@
             icon.textContent = fields.classList.contains('open') ? '▼' : '▶';
         }
         
-        // Get selected AI model configuration
+        /**
+         * Get the selected AI model configuration.
+         * Model precedence (highest to lowest):
+         *   1. Custom model text input (if not empty)
+         *   2. Model dropdown selection
+         *   3. Server default (if both are empty)
+         */
         function getModelConfig() {
             const provider = document.getElementById('aiProvider').value;
+            // Custom model takes precedence over dropdown selection
             const model = document.getElementById('customModel').value.trim() || 
                          document.getElementById('aiModel').value;
             return { provider, model };

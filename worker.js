@@ -168,10 +168,11 @@ async function handleAnalyze(request, env) {
 
   // Create effective env with request-level overrides
   const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel);
-
-  // KV cache lookup (include model in cache key if specified)
-  const modelKey = aiModel ? `:${aiModel}` : '';
-  const cacheKey = `result:${side}:${imageHash}${modelKey}`;
+  
+  // Always include effective model in cache key for consistency
+  // This ensures identical images analyzed with the same model (explicit or default) hit the same cache
+  const effectiveModel = effectiveEnv.AI_MODEL;
+  const cacheKey = `result:${side}:${imageHash}:${effectiveModel}`;
   let cached = null;
   try {
     cached = await env.IRIS_KV.get(cacheKey, 'json');
@@ -180,7 +181,7 @@ async function handleAnalyze(request, env) {
     console.error('KV get error:', kvErr?.message || kvErr);
   }
   if (cached) {
-    return jsonResp({ cached: true, imageHash, side, model: aiModel || effectiveEnv.AI_MODEL, result: cached });
+    return jsonResp({ cached: true, imageHash, side, model: effectiveModel, result: cached });
   }
 
   // Run pipeline with effective env
@@ -190,7 +191,7 @@ async function handleAnalyze(request, env) {
   // Store in KV with 24-hour TTL
   await env.IRIS_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
 
-  return jsonResp({ cached: false, imageHash, side, model: aiModel || effectiveEnv.AI_MODEL, result });
+  return jsonResp({ cached: false, imageHash, side, model: effectiveModel, result });
 }
 
 // Create effective environment with request-level AI config overrides
