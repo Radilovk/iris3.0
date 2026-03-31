@@ -1,162 +1,250 @@
-# iris3.0
+# Iris 3.0 - Иридологичен Анализатор
 
-Iris iridology analysis system using advanced AI vision models for medical image analysis.
+Автоматизирана система за иридологичен анализ, използваща компютърно зрение и AI.
 
-## Overview
+## 🎯 Какво прави
 
-This project uses cutting-edge AI models to analyze unwrapped iris images for iridology diagnosis. The system supports multiple AI providers with modern, high-performance vision models optimized for medical image analysis.
+1. **Детекция** - Открива зеницата и ириса в снимка на окото
+2. **Маскиране** - Автоматично маскира клепачите с RANSAC алгоритъм
+3. **Разгъване** - Трансформира кръглия ирис в правоъгълна "лента" (unwrap)
+4. **AI Анализ** - Изпраща разгърнатата лента към GPT-4 Vision за иридологичен анализ
+5. **Доклад** - Генерира здравен профил на български език
 
-## AI Model Configuration (2026)
+---
 
-### Supported AI Providers
+## 📱 УЕБ ПРИЛОЖЕНИЕ (Работи на телефон!)
 
-The system now supports multiple AI providers with state-of-the-art vision models:
+**Най-лесният начин** - отворете `webapp.html` директно в браузъра или го хоствайте безплатно.
 
-#### 1. **Google Gemini** (Recommended - Default)
-- **Model:** `gemini-2.0-flash-exp` (Latest experimental)
-- **Advantages:**
-  - Native multimodal capabilities with superior image analysis
-  - 1 million token context window
-  - Can analyze up to 3,000 images per prompt
-  - Faster processing speed
-  - Built-in native image generation
-  - More cost-effective than GPT-4o
-  - Free tier available for testing
-- **Alternative Models:**
-  - `gemini-2.5-flash-latest` - Production-ready, stable
-  - `gemini-1.5-pro-latest` - Fallback option
+### 🌐 Хостване на Cloudflare Pages (препоръчително)
 
-#### 2. **OpenAI GPT-4o**
-- **Model:** `gpt-4o` (Premium flagship)
-- **Advantages:**
-  - Excellent vision and reasoning capabilities
-  - Full multimodal support (text, images, audio, video)
-  - High benchmark scores (MMMU 69.1)
-  - 128K context window
-- **Cost:** Premium pricing ($2.50-5/M input tokens)
+1. Качете файловете в GitHub
+2. Влезте в [Cloudflare Pages](https://pages.cloudflare.com)
+3. Свържете репозиторито
+4. Деплойнете - готово! 
 
-#### 3. **OpenAI GPT-4o-mini** (Cost-effective)
-- **Model:** `gpt-4o-mini`
-- **Advantages:**
-  - 15-25x cheaper than GPT-4o ($0.15/M input tokens)
-  - Strong vision capabilities (MMMU 59.4%)
-  - 128K context window
-  - Excellent for high-volume processing
-- **Best for:** Budget-conscious deployments, batch processing
+Вашето приложение ще бъде достъпно на `https://iris3.pages.dev` (или подобен адрес)
 
-### Configuration
+### 🌐 Алтернативи за хостване
 
-Edit `wrangler.toml` to configure your AI provider:
+| Платформа | Безплатно | Как се хоства |
+|-----------|-----------|---------------|
+| **Cloudflare Pages** | ✅ | Свържете GitHub репо |
+| **GitHub Pages** | ✅ | Settings → Pages → Deploy |
+| **Vercel** | ✅ | Import Git Repository |
+| **Netlify** | ✅ | Drag & drop папката |
+
+### 📲 Как работи на телефон
+
+1. Отворете URL адреса в браузъра
+2. Докоснете "Дясно око" или "Ляво око"
+3. Камерата се отваря автоматично
+4. Снимайте окото
+5. Натиснете "АНАЛИЗИРАЙ"
+
+**Бонус:** Добавете към началния екран за по-бърз достъп!
+
+---
+
+## 🏗️ Архитектура
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        УЕБОЩА ВЕРСИЯ                            │
+│   webapp.html (работи изцяло в браузъра с OpenCV.js)           │
+│   - Детекция на ирис                                            │
+│   - Unwrap към правоъгълник                                     │
+│   - Изпраща само към AI Worker (по желание)                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────────┐
+│   Flask App     │────▶│ Cloudflare Worker│────▶│   OpenAI API        │
+│   (app.py)      │     │   (worker.js)    │     │   (GPT-4 Vision)    │
+│                 │     │                  │     │                     │
+│ - Детекция      │     │ - 5-стъпков      │     │ - Анализ на         │
+│ - Unwrap        │     │   AI pipeline    │     │   изображения       │
+│ - Маскиране     │     │ - Кеширане (KV)  │     │                     │
+└─────────────────┘     └──────────────────┘     └─────────────────────┘
+```
+
+---
+
+## 🖥️ Локално стартиране (за разработка)
+
+### Linux / macOS
+```bash
+./start.sh
+```
+
+### Windows
+```cmd
+start.bat
+```
+
+Скриптът автоматично ще:
+- ✅ Провери дали Python е инсталиран
+- ✅ Създаде виртуална среда (venv)
+- ✅ Инсталира всички зависимости
+- ✅ Стартира сървъра на http://localhost:5000
+
+### С AI анализ
+
+**Linux / macOS:**
+```bash
+IRIS_WORKER_URL="https://your-worker.workers.dev" ./start.sh
+```
+
+**Windows:**
+```cmd
+set IRIS_WORKER_URL=https://your-worker.workers.dev && start.bat
+```
+
+## 📦 Ръчна инсталация (ако предпочитате)
+
+```bash
+# Инсталиране на зависимости
+pip install -r requirements.txt
+
+# Стартиране (без AI анализ)
+python app.py
+
+# Стартиране с AI анализ
+IRIS_WORKER_URL="https://your-worker.workers.dev" python app.py
+```
+
+## ☁️ Cloudflare Worker (за AI анализ)
+
+```bash
+# Инсталиране на Wrangler
+npm install -g wrangler
+
+# Вход в Cloudflare
+wrangler login
+
+# Създаване на KV namespace
+wrangler kv namespace create IRIS_KV
+# Копирайте id и preview_id в wrangler.toml
+
+# Задаване на API ключ
+wrangler secret put AI_API_KEY
+
+# Деплой
+wrangler deploy
+```
+
+## 📐 Координатна система на разгърнатата карта
+
+Разгънатата ирисова лента има следната структура:
+
+```
+          0    5   10   15   20   25   30   35   40   45   50   55   60  (минути)
+         12ч  1ч  2ч   3ч   4ч   5ч   6ч   7ч   8ч   9ч  10ч  11ч  12ч  (часовник)
+        ╔════════════════════════════════════════════════════════════════╗
+   R0   ║                    IPB (зенична граница)                       ║
+   R1   ║                    STOM (стомашен пръстен)                     ║
+  R2-R3 ║                    ANW (автономен венец)                       ║
+  R4-R9 ║                    ORG (органна зона)                          ║
+   R10  ║                    LYM (лимфна зона)                           ║
+   R11  ║                    SCU (кожна зона)                            ║
+        ╚════════════════════════════════════════════════════════════════╝
+              ^                           ^                           ^
+           NASAL/                      LOWER                        NASAL/
+          TEMPORAL                    EYELID                       TEMPORAL
+          (за R:15ч=temp)            (masked)                     (за L:15ч=nasal)
+```
+
+### Конверсия на координати
+
+- **X ос (минути)**: `minute = (x_pixel - 60) / 1200 × 60`
+- **Y ос (пръстени)**: `ring = (y_pixel - 50) / 300 × 12`
+- **Градуси**: `degrees = minute × 6`
+
+### Как изглеждат находките в правоъгълника
+
+| Кръгла форма | Правоъгълна форма |
+|--------------|-------------------|
+| Концентрични (около центъра) | Хоризонтални ленти |
+| Радиални (от центъра) | Вертикални ивици |
+| Точкови (лакуни, крипти) | Дискретни петна |
+| Диагонални (трансверсални) | Диагонални линии |
+
+## 🔬 AI Pipeline (5 стъпки)
+
+1. **STEP1** - Гео-калибрация: проверка на качеството и валидност
+2. **STEP2A** - Структурен детектор: лакуни, крипти, бразди, цепнатини
+3. **STEP2B** - Пигмент/периферия: петна, облаци, пръстени, розарий
+4. **STEP2C** - Консистентност: премахване на дубликати и противоречия
+5. **STEP3** - Mapper: свързване на находки с органи/системи
+6. **STEP4** - Профил: изграждане на здравен профил
+7. **STEP5** - Доклад: генериране на финален доклад на български
+
+## 📋 Въпросник
+
+За по-точен анализ можете да попълните въпросник с:
+- Възраст, пол, ръст, тегло
+- Ниво на стрес
+- Качество и продължителност на съня
+- Физическа активност
+- Здравословни цели и оплаквания
+- Хранителни навици
+- Лекарства и алергии
+
+## 🔧 Конфигурация
+
+### AI Модели (Актуализация 2026)
+
+Системата поддържа множество AI провайдери с най-нови модели:
+
+#### 🎯 Препоръчан: Google Gemini 2.0 Flash
+- **Модел:** `gemini-2.0-flash-exp` (експериментален) или `gemini-2.5-flash-latest` (стабилен)
+- **Предимства:**
+  - 1 милион токена контекст (срещу 128K)
+  - До 3000 изображения на запитване
+  - По-бърза обработка
+  - По-ниска цена
+  - Безплатен tier за тестване
+- **API ключ:** https://aistudio.google.com/app/apikey
+
+#### 💰 Икономичен: OpenAI GPT-4o-mini
+- **Модел:** `gpt-4o-mini`
+- **Предимства:**
+  - 15-25x по-евтин от GPT-4o
+  - Силни vision възможности
+  - Добър за големи обеми обработка
+
+#### 🏆 Премиум: OpenAI GPT-4o
+- **Модел:** `gpt-4o`
+- **Предимства:**
+  - Отлични vision и reasoning способности
+  - Най-високо качество на анализа
+
+### Конфигурация в wrangler.toml
 
 ```toml
 [vars]
-# Choose provider: "openai", "gemini", or "openai-compatible"
+# Избор на провайдер: "openai", "gemini", или "openai-compatible"
 AI_PROVIDER = "gemini"
 
-# Set your model
-AI_MODEL = "gemini-2.0-flash-exp"  # or "gpt-4o", "gpt-4o-mini"
+# Модел (препоръчан: gemini-2.0-flash-exp)
+AI_MODEL = "gemini-2.0-flash-exp"
 
-# API URLs (configured automatically based on provider)
+# API URLs
 AI_BASE_URL = "https://api.openai.com/v1"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 ```
 
-### Setting API Keys
+### Променливи на средата
 
-For **Gemini** (recommended):
-```bash
-# Get your API key from: https://aistudio.google.com/app/apikey
-wrangler secret put AI_API_KEY
-```
+| Променлива | Описание | По подразбиране |
+|------------|----------|-----------------|
+| `IRIS_WORKER_URL` | URL на Cloudflare Worker | (празно) |
+| `IRIS_WORKER_TIMEOUT` | Timeout в секунди | 120 |
+| `AI_PROVIDER` | AI провайдер | gemini |
+| `AI_MODEL` | AI модел | gemini-2.0-flash-exp |
+| `AI_BASE_URL` | OpenAI API endpoint | https://api.openai.com/v1 |
+| `GEMINI_API_URL` | Gemini API endpoint | https://generativelanguage.googleapis.com/v1beta |
 
-For **OpenAI**:
-```bash
-# Get your API key from: https://platform.openai.com/api-keys
-wrangler secret put AI_API_KEY
-```
+## 📄 Лиценз
 
-## Deployment
-
-1. Install Wrangler:
-   ```bash
-   npm install -g wrangler
-   ```
-
-2. Log in:
-   ```bash
-   wrangler login
-   ```
-
-3. Create KV namespace:
-   ```bash
-   wrangler kv namespace create IRIS_KV
-   ```
-   Copy the `id` and `preview_id` from output into `wrangler.toml`
-
-4. Set your AI API key:
-   ```bash
-   wrangler secret put AI_API_KEY
-   ```
-
-5. Deploy:
-   ```bash
-   wrangler deploy
-   ```
-
-## Usage
-
-### Analyze Iris Image
-```bash
-POST https://<worker-subdomain>.workers.dev/analyze
-```
-
-Form fields:
-- `strip_image` — base64 JPEG from app.py
-- `side` — "R" or "L"
-- `image_hash` — optional unique ID
-- `questionnaire` — optional JSON with patient data
-
-### Retrieve Results
-```bash
-GET https://<worker-subdomain>.workers.dev/result/<side>:<hash>
-```
-
-## Model Comparison
-
-| Feature | Gemini 2.0 Flash | GPT-4o | GPT-4o-mini |
-|---------|------------------|---------|-------------|
-| Vision Quality | Excellent | Excellent | Very Good |
-| Speed | Very Fast | Fast | Very Fast |
-| Context Window | 1M tokens | 128K | 128K |
-| Cost | Low | High | Very Low |
-| Multi-image | 3000/prompt | Limited | Limited |
-| Native JSON | Yes | Yes | Yes |
-| **Recommended** | ✅ Yes | For premium needs | For budget |
-
-## Why Upgrade from GPT-4o?
-
-The original configuration used `gpt-4o` from 2024. In 2026, better options are available:
-
-1. **Gemini 2.0 Flash** offers:
-   - Comparable or better vision analysis
-   - Much faster processing
-   - Lower costs
-   - Larger context window (1M vs 128K)
-   - Better suited for medical image analysis
-
-2. **GPT-4o-mini** offers:
-   - Significantly lower costs (15-25x cheaper)
-   - Strong vision capabilities
-   - Better for high-volume deployments
-
-## Architecture
-
-The system uses a 5-step AI pipeline:
-- **STEP1:** Geo calibration
-- **STEP2A/2B:** Structural + pigment detection (parallel)
-- **STEP2C:** Consistency validator
-- **STEP3:** Zone mapper
-- **STEP4:** Profile builder
-- **STEP5:** Bulgarian report generation
-
-All steps leverage the configured AI model's vision capabilities for precise iris analysis.
+MIT License
