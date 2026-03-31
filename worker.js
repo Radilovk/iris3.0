@@ -59,6 +59,12 @@ export default {
         const key = url.pathname.slice('/result/'.length); // "R:abc123"
         return await handleGetResult(key, env);
       }
+      if (request.method === 'GET' && url.pathname === '/models') {
+        return handleGetModels(env);
+      }
+      if (request.method === 'GET' && url.pathname === '/health') {
+        return handleHealthCheck(env);
+      }
       return jsonResp({ error: 'Not Found' }, 404);
     } catch (err) {
       const msg = err?.message || String(err);
@@ -66,6 +72,77 @@ export default {
     }
   },
 };
+
+// =====================================================================
+// Available AI Models Configuration
+// =====================================================================
+const AVAILABLE_MODELS = {
+  gemini: {
+    name: 'Google Gemini',
+    models: [
+      { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash Exp', recommended: true, vision: true },
+      { id: 'gemini-2.5-flash-latest', name: 'Gemini 2.5 Flash Latest', vision: true },
+      { id: 'gemini-1.5-pro-latest', name: 'Gemini 1.5 Pro Latest', vision: true },
+      { id: 'gemini-1.5-flash-latest', name: 'Gemini 1.5 Flash Latest', vision: true },
+      { id: 'gemini-pro-vision', name: 'Gemini Pro Vision', vision: true },
+    ]
+  },
+  openai: {
+    name: 'OpenAI',
+    models: [
+      { id: 'gpt-4o', name: 'GPT-4o', recommended: true, vision: true },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', vision: true, costEffective: true },
+      { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', vision: true },
+      { id: 'gpt-4-vision-preview', name: 'GPT-4 Vision Preview', vision: true },
+      { id: 'o1-preview', name: 'O1 Preview', vision: false, reasoning: true },
+    ]
+  },
+  'openai-compatible': {
+    name: 'OpenAI-Compatible APIs',
+    models: [
+      { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', vision: true },
+      { id: 'claude-3-sonnet-20240229', name: 'Claude 3 Sonnet', vision: true },
+      { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', vision: true, costEffective: true },
+      { id: 'llava-v1.6-34b', name: 'LLaVA v1.6 34B', vision: true, local: true },
+      { id: 'mistral-large-latest', name: 'Mistral Large', vision: false },
+    ]
+  }
+};
+
+// =====================================================================
+// ROUTE: GET /models - List available AI models
+// =====================================================================
+function handleGetModels(env) {
+  const currentProvider = env.AI_PROVIDER || 'gemini';
+  const currentModel = env.AI_MODEL || 'gemini-2.0-flash-exp';
+  
+  return jsonResp({
+    currentConfig: {
+      provider: currentProvider,
+      model: currentModel,
+    },
+    availableProviders: AVAILABLE_MODELS,
+    note: 'You can override the model per-request by passing ai_provider and ai_model in the /analyze request',
+  });
+}
+
+// =====================================================================
+// ROUTE: GET /health - Health check endpoint
+// =====================================================================
+function handleHealthCheck(env) {
+  const hasApiKey = !!env.AI_API_KEY;
+  const provider = env.AI_PROVIDER || 'gemini';
+  const model = env.AI_MODEL || 'gemini-2.0-flash-exp';
+  
+  return jsonResp({
+    status: hasApiKey ? 'healthy' : 'degraded',
+    version: 'v9',
+    provider,
+    model,
+    apiKeyConfigured: hasApiKey,
+    kvConfigured: !!env.IRIS_KV,
+  });
+}
 
 // =====================================================================
 // ROUTE: POST /analyze
@@ -77,6 +154,10 @@ async function handleAnalyze(request, env) {
   const imageHash    = form.get('image_hash') || genId();
   const qRaw         = form.get('questionnaire');
   const questionnaire = qRaw ? safeParseJSON(qRaw) : {};
+  
+  // Dynamic AI model configuration from request (overrides env defaults)
+  const aiProvider   = form.get('ai_provider') || null;
+  const aiModel      = form.get('ai_model') || null;
 
   if (!stripB64) {
     return jsonResp({ error: 'strip_image is required (base64 JPEG of the unwrapped iris strip from app.py)' }, 400);
@@ -85,8 +166,12 @@ async function handleAnalyze(request, env) {
     return jsonResp({ error: 'side must be "R" or "L"' }, 400);
   }
 
-  // KV cache lookup
-  const cacheKey = `result:${side}:${imageHash}`;
+  // Create effective env with request-level overrides
+  const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel);
+
+  // KV cache lookup (include model in cache key if specified)
+  const modelKey = aiModel ? `:${aiModel}` : '';
+  const cacheKey = `result:${side}:${imageHash}${modelKey}`;
   let cached = null;
   try {
     cached = await env.IRIS_KV.get(cacheKey, 'json');
@@ -95,17 +180,33 @@ async function handleAnalyze(request, env) {
     console.error('KV get error:', kvErr?.message || kvErr);
   }
   if (cached) {
-    return jsonResp({ cached: true, imageHash, side, result: cached });
+    return jsonResp({ cached: true, imageHash, side, model: aiModel || effectiveEnv.AI_MODEL, result: cached });
   }
 
-  // Run pipeline
-  const pipeline = new IrisPipeline(env, stripB64, side, imageHash, questionnaire);
+  // Run pipeline with effective env
+  const pipeline = new IrisPipeline(effectiveEnv, stripB64, side, imageHash, questionnaire);
   const result = await pipeline.run();
 
   // Store in KV with 24-hour TTL
   await env.IRIS_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
 
-  return jsonResp({ cached: false, imageHash, side, result });
+  return jsonResp({ cached: false, imageHash, side, model: aiModel || effectiveEnv.AI_MODEL, result });
+}
+
+// Create effective environment with request-level AI config overrides
+function createEffectiveEnv(env, aiProvider, aiModel) {
+  // Return a proxy-like object that overrides AI settings if provided
+  return {
+    // Pass through all original env properties
+    IRIS_KV: env.IRIS_KV,
+    AI_API_KEY: env.AI_API_KEY,
+    AI_BASE_URL: env.AI_BASE_URL,
+    GEMINI_API_URL: env.GEMINI_API_URL,
+    // Override AI_PROVIDER if specified in request
+    AI_PROVIDER: aiProvider || env.AI_PROVIDER || 'gemini',
+    // Override AI_MODEL if specified in request
+    AI_MODEL: aiModel || env.AI_MODEL || 'gemini-2.0-flash-exp',
+  };
 }
 
 // =====================================================================

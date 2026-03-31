@@ -430,10 +430,41 @@
                    placeholder="https://your-worker.workers.dev" 
                    value="">
             <p class="config-hint">Оставете празно за работа само с обработка на изображения (без AI анализ)</p>
+            
+            <!-- AI Model Selection -->
+            <div class="model-config" style="margin-top: 15px;">
+                <h4 style="margin-bottom: 10px; font-size: 0.9rem;">🤖 AI Модел (по избор)</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div class="field-group">
+                        <label>Доставчик</label>
+                        <select id="aiProvider" class="config-input" onchange="updateModelList()">
+                            <option value="">-- По подразбиране (от Worker) --</option>
+                            <option value="gemini">Google Gemini</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="openai-compatible">OpenAI-съвместим</option>
+                        </select>
+                    </div>
+                    <div class="field-group">
+                        <label>Модел</label>
+                        <select id="aiModel" class="config-input">
+                            <option value="">-- По подразбиране --</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field-group" style="margin-top: 10px;">
+                    <label>Или въведете ръчно име на модел</label>
+                    <input type="text" id="customModel" class="config-input" 
+                           placeholder="напр. gemini-2.5-flash-latest, gpt-4o, claude-3-opus">
+                </div>
+                <p class="config-hint">Ръчно въведеният модел има приоритет над избрания от списъка</p>
+            </div>
         </div>
         
         <!-- Upload Section -->
         <div class="upload-section">
+            <p class="config-hint" style="margin-bottom: 15px; text-align: center;">
+                📷 Поддържани формати: JPEG, PNG, HEIC | Максимален размер: 10 MB
+            </p>
             <div class="upload-grid">
                 <!-- Right Eye -->
                 <div class="upload-box" id="uploadBoxR" onclick="document.getElementById('fileR').click()">
@@ -564,6 +595,100 @@
         let cvReady = false;
         const selectedFiles = { R: null, L: null };
         
+        // Maximum file size: 10 MB
+        const MAX_FILE_SIZE_MB = 10;
+        const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+        
+        // Maximum image dimension for processing (to prevent memory issues)
+        const MAX_IMAGE_DIMENSION = 4000;
+        
+        // AI Model configurations
+        const AI_MODELS = {
+            gemini: [
+                { value: 'gemini-2.0-flash-exp', label: 'Gemini 2.0 Flash Exp (препоръчан)' },
+                { value: 'gemini-2.5-flash-latest', label: 'Gemini 2.5 Flash Latest' },
+                { value: 'gemini-1.5-pro-latest', label: 'Gemini 1.5 Pro Latest' },
+                { value: 'gemini-1.5-flash-latest', label: 'Gemini 1.5 Flash Latest' },
+                { value: 'gemini-pro-vision', label: 'Gemini Pro Vision' }
+            ],
+            openai: [
+                { value: 'gpt-4o', label: 'GPT-4o (флагман)' },
+                { value: 'gpt-4o-mini', label: 'GPT-4o Mini (по-евтин)' },
+                { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
+                { value: 'gpt-4-vision-preview', label: 'GPT-4 Vision Preview' },
+                { value: 'o1-preview', label: 'O1 Preview (reasoning)' }
+            ],
+            'openai-compatible': [
+                { value: 'claude-3-opus-20240229', label: 'Claude 3 Opus' },
+                { value: 'claude-3-sonnet-20240229', label: 'Claude 3 Sonnet' },
+                { value: 'claude-3-haiku-20240307', label: 'Claude 3 Haiku' },
+                { value: 'llava-v1.6-34b', label: 'LLaVA v1.6 34B (локален)' },
+                { value: 'mistral-large-latest', label: 'Mistral Large' }
+            ]
+        };
+        
+        // ==========================================
+        // MODEL SELECTION
+        // ==========================================
+        function updateModelList() {
+            const provider = document.getElementById('aiProvider').value;
+            const modelSelect = document.getElementById('aiModel');
+            
+            // Clear existing options
+            modelSelect.innerHTML = '<option value="">-- По подразбиране --</option>';
+            
+            // Add models for selected provider
+            if (provider && AI_MODELS[provider]) {
+                AI_MODELS[provider].forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.value;
+                    option.textContent = model.label;
+                    modelSelect.appendChild(option);
+                });
+            }
+            
+            // Save selection
+            saveModelConfig();
+        }
+        
+        function getSelectedModelConfig() {
+            const provider = document.getElementById('aiProvider').value;
+            const model = document.getElementById('customModel').value.trim() || 
+                         document.getElementById('aiModel').value;
+            
+            return { provider, model };
+        }
+        
+        function saveModelConfig() {
+            const config = {
+                provider: document.getElementById('aiProvider').value,
+                model: document.getElementById('aiModel').value,
+                customModel: document.getElementById('customModel').value
+            };
+            localStorage.setItem('irisModelConfig', JSON.stringify(config));
+        }
+        
+        function loadModelConfig() {
+            try {
+                const saved = localStorage.getItem('irisModelConfig');
+                if (saved) {
+                    const config = JSON.parse(saved);
+                    if (config.provider) {
+                        document.getElementById('aiProvider').value = config.provider;
+                        updateModelList();
+                        if (config.model) {
+                            document.getElementById('aiModel').value = config.model;
+                        }
+                    }
+                    if (config.customModel) {
+                        document.getElementById('customModel').value = config.customModel;
+                    }
+                }
+            } catch (e) {
+                console.warn('Could not load model config:', e);
+            }
+        }
+        
         // ==========================================
         // OPENCV INITIALIZATION
         // ==========================================
@@ -580,11 +705,25 @@
         }
         
         // ==========================================
-        // FILE HANDLING
+        // FILE HANDLING WITH SIZE VALIDATION
         // ==========================================
         function handleFileSelect(input, side) {
             const file = input.files[0];
             if (!file) return;
+            
+            // Validate file size (10 MB limit)
+            if (file.size > MAX_FILE_SIZE_BYTES) {
+                alert(`Файлът е твърде голям (${(file.size / 1024 / 1024).toFixed(1)} MB).\nМаксимален размер: ${MAX_FILE_SIZE_MB} MB`);
+                input.value = '';
+                return;
+            }
+            
+            // Validate file type
+            if (!file.type.startsWith('image/')) {
+                alert('Моля изберете файл с изображение (JPEG, PNG, HEIC и др.)');
+                input.value = '';
+                return;
+            }
             
             selectedFiles[side] = file;
             const box = document.getElementById('uploadBox' + side);
@@ -596,6 +735,7 @@
                 content.innerHTML = `
                     <img src="${e.target.result}" class="preview-img" alt="Preview">
                     <button class="remove-btn" onclick="removeFile(event, '${side}')">&times;</button>
+                    <div class="file-size-badge" style="position:absolute;bottom:5px;left:5px;background:rgba(0,0,0,0.7);padding:2px 6px;border-radius:4px;font-size:0.7rem;">${formatFileSize(file.size)}</div>
                 `;
                 box.classList.add('has-image');
             };
@@ -605,6 +745,12 @@
             if (cvReady) {
                 document.getElementById('analyzeBtn').disabled = false;
             }
+        }
+        
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1024 / 1024).toFixed(1) + ' MB';
         }
         
         function removeFile(event, side) {
@@ -669,7 +815,7 @@
         // IMAGE PROCESSING WITH OPENCV.JS
         // ==========================================
         
-        // Load image from file to cv.Mat
+        // Load image from file to cv.Mat with automatic resizing for large images
         function loadImageFromFile(file) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
@@ -677,12 +823,34 @@
                     const img = new Image();
                     img.onload = function() {
                         const canvas = document.getElementById('processingCanvas');
-                        canvas.width = img.width;
-                        canvas.height = img.height;
+                        
+                        // Calculate dimensions - resize if image is too large
+                        let width = img.width;
+                        let height = img.height;
+                        let resized = false;
+                        
+                        if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+                            const scale = Math.min(
+                                MAX_IMAGE_DIMENSION / width,
+                                MAX_IMAGE_DIMENSION / height
+                            );
+                            width = Math.round(width * scale);
+                            height = Math.round(height * scale);
+                            resized = true;
+                            console.log(`Image resized from ${img.width}x${img.height} to ${width}x${height}`);
+                        }
+                        
+                        canvas.width = width;
+                        canvas.height = height;
                         const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0);
+                        
+                        // Use high-quality image smoothing for resizing
+                        ctx.imageSmoothingEnabled = true;
+                        ctx.imageSmoothingQuality = 'high';
+                        ctx.drawImage(img, 0, 0, width, height);
+                        
                         const mat = cv.imread(canvas);
-                        resolve(mat);
+                        resolve({ mat, resized, originalWidth: img.width, originalHeight: img.height });
                     };
                     img.onerror = reject;
                     img.src = e.target.result;
@@ -911,7 +1079,7 @@
         
         // Process single eye image
         async function processEye(file, side) {
-            const mat = await loadImageFromFile(file);
+            const { mat, resized, originalWidth, originalHeight } = await loadImageFromFile(file);
             const gray = preprocessImage(mat);
             const pupil = findPupil(gray);
             
@@ -939,7 +1107,9 @@
             return {
                 found: true,
                 overlay: overlayB64,
-                mapped: mappedB64
+                mapped: mappedB64,
+                resized,
+                originalDimensions: resized ? `${originalWidth}x${originalHeight}` : null
             };
         }
         
@@ -972,6 +1142,15 @@
                 formData.append('side', side);
                 if (questionnaire) {
                     formData.append('questionnaire', JSON.stringify(questionnaire));
+                }
+                
+                // Add model configuration if specified
+                const modelConfig = getSelectedModelConfig();
+                if (modelConfig.provider) {
+                    formData.append('ai_provider', modelConfig.provider);
+                }
+                if (modelConfig.model) {
+                    formData.append('ai_model', modelConfig.model);
                 }
                 
                 const response = await fetch(workerUrl + '/analyze', {
@@ -1131,7 +1310,7 @@
         // INITIALIZATION
         // ==========================================
         
-        // Load saved worker URL from localStorage
+        // Load saved worker URL and model config from localStorage
         document.addEventListener('DOMContentLoaded', function() {
             const savedUrl = localStorage.getItem('irisWorkerUrl');
             if (savedUrl) {
@@ -1142,6 +1321,14 @@
             document.getElementById('workerUrl').addEventListener('change', function() {
                 localStorage.setItem('irisWorkerUrl', this.value);
             });
+            
+            // Load model configuration
+            loadModelConfig();
+            
+            // Save model config on change
+            document.getElementById('aiProvider').addEventListener('change', saveModelConfig);
+            document.getElementById('aiModel').addEventListener('change', saveModelConfig);
+            document.getElementById('customModel').addEventListener('change', saveModelConfig);
         });
         
         // Drag and drop support
@@ -1162,6 +1349,11 @@
                 box.classList.remove('dragover');
                 const file = e.dataTransfer.files[0];
                 if (file && file.type.startsWith('image/')) {
+                    // Validate file size before accepting
+                    if (file.size > MAX_FILE_SIZE_BYTES) {
+                        alert(`Файлът е твърде голям (${(file.size / 1024 / 1024).toFixed(1)} MB).\nМаксимален размер: ${MAX_FILE_SIZE_MB} MB`);
+                        return;
+                    }
                     const input = document.getElementById('file' + side);
                     const dt = new DataTransfer();
                     dt.items.add(file);
