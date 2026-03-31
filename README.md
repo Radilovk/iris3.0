@@ -23,22 +23,50 @@
 └─────────────────┘     └──────────────────┘     └─────────────────────┘
 ```
 
-## 🚀 Инсталация и стартиране
+## 🚀 Бързо стартиране (АВТОМАТИЧНО)
 
-### 1. Python Backend (app.py)
+### Linux / macOS
+```bash
+./start.sh
+```
+
+### Windows
+```cmd
+start.bat
+```
+
+Скриптът автоматично ще:
+- ✅ Провери дали Python е инсталиран
+- ✅ Създаде виртуална среда (venv)
+- ✅ Инсталира всички зависимости
+- ✅ Стартира сървъра на http://localhost:5000
+
+### С AI анализ
+
+**Linux / macOS:**
+```bash
+IRIS_WORKER_URL="https://your-worker.workers.dev" ./start.sh
+```
+
+**Windows:**
+```cmd
+set IRIS_WORKER_URL=https://your-worker.workers.dev && start.bat
+```
+
+## 📦 Ръчна инсталация (ако предпочитате)
 
 ```bash
 # Инсталиране на зависимости
-pip install flask opencv-python numpy requests
+pip install -r requirements.txt
 
 # Стартиране (без AI анализ)
 python app.py
 
-# Стартиране с AI анализ (изисква конфигуриран Worker)
+# Стартиране с AI анализ
 IRIS_WORKER_URL="https://your-worker.workers.dev" python app.py
 ```
 
-### 2. Cloudflare Worker (за AI анализ)
+## ☁️ Cloudflare Worker (за AI анализ)
 
 ```bash
 # Инсталиране на Wrangler
