@@ -3,6 +3,7 @@ REM ============================================
 REM Iris 3.0 - Automatic Startup Script (Windows)
 REM ============================================
 
+REM Set UTF-8 encoding for proper display of Bulgarian text
 chcp 65001 > nul 2>&1
 setlocal enabledelayedexpansion
 

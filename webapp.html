@@ -715,7 +715,8 @@
         // Find pupil using threshold and contours
         function findPupil(grayMat) {
             const blur = new cv.Mat();
-            cv.medianBlur(grayMat, blur, 13);
+            // Use smaller kernel for better mobile performance (7 instead of 13)
+            cv.medianBlur(grayMat, blur, 7);
             
             const thresh = new cv.Mat();
             cv.threshold(blur, thresh, 40, 255, cv.THRESH_BINARY_INV);
@@ -789,9 +790,12 @@
         }
         
         // Unwrap iris to rectangular strip (polar to cartesian)
+        // Mobile-optimized: uses smaller dimensions for better performance
         function unwrapIris(mat, px, py, pr, ir) {
-            const outputWidth = 1200;
-            const outputHeight = 300;
+            // Detect if mobile device and use smaller output
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const outputWidth = isMobile ? 800 : 1200;
+            const outputHeight = isMobile ? 200 : 300;
             const result = new cv.Mat(outputHeight, outputWidth, cv.CV_8UC4);
             
             for (let y = 0; y < outputHeight; y++) {
@@ -939,12 +943,28 @@
             };
         }
         
+        // Validate worker URL - must be HTTPS
+        function isValidWorkerUrl(url) {
+            if (!url) return false;
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        }
+        
         // ==========================================
         // AI ANALYSIS (CLOUDFLARE WORKER)
         // ==========================================
         async function callWorkerAnalysis(stripB64, side, questionnaire) {
             const workerUrl = document.getElementById('workerUrl').value.trim();
             if (!workerUrl) return null;
+            
+            // Validate URL for security
+            if (!isValidWorkerUrl(workerUrl)) {
+                return { error: 'Невалиден Worker URL. Трябва да започва с https://' };
+            }
             
             try {
                 const formData = new FormData();
