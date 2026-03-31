@@ -2,94 +2,912 @@
 <html lang="bg">
 <head>
     <meta charset="UTF-8">
-    <title>Dual Iris Analyzer (Custom Detection)</title>
+    <title>Иридологичен Анализатор - Iris 3.0</title>
     <style>
-        body { background: #1a1a1a; color: #ddd; font-family: sans-serif; padding: 20px; }
-        .container { max-width: 1400px; margin: auto; }
-        .controls { background: #333; padding: 20px; border-radius: 8px; display: flex; gap: 20px; margin-bottom: 20px; }
-        .file-group { flex: 1; display: flex; flex-direction: column; gap: 10px; }
-        .btn { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 16px; }
-        .btn:hover { background: #0056b3; }
-        .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
-        .eye-column { background: #222; padding: 15px; border-radius: 8px; border: 1px solid #444; }
-        h2 { border-bottom: 2px solid #555; padding-bottom: 10px; color: #fff; }
-        img { max-width: 100%; border: 1px solid #555; margin-top: 10px; display: none; }
-        .label { font-weight: bold; color: #aaa; margin-top: 15px; display: block; }
+        :root {
+            --bg-dark: #1a1a1a;
+            --bg-card: #222;
+            --bg-control: #333;
+            --accent: #007bff;
+            --accent-hover: #0056b3;
+            --success: #28a745;
+            --warning: #ffc107;
+            --danger: #dc3545;
+            --text: #ddd;
+            --text-muted: #aaa;
+            --border: #444;
+        }
+        
+        * { box-sizing: border-box; }
+        body { 
+            background: var(--bg-dark); 
+            color: var(--text); 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+            padding: 20px; 
+            margin: 0;
+            line-height: 1.5;
+        }
+        .container { max-width: 1600px; margin: auto; }
+        
+        h1 { 
+            text-align: center; 
+            margin-bottom: 30px; 
+            color: #fff;
+            font-size: 2rem;
+        }
+        h2 { 
+            border-bottom: 2px solid #555; 
+            padding-bottom: 10px; 
+            color: #fff; 
+            margin-top: 0;
+        }
+        h3 { 
+            color: #fff; 
+            margin: 15px 0 10px 0; 
+            font-size: 1rem;
+        }
+        
+        /* Controls section */
+        .controls { 
+            background: var(--bg-control); 
+            padding: 25px; 
+            border-radius: 10px; 
+            margin-bottom: 25px; 
+        }
+        .controls-row {
+            display: flex; 
+            gap: 20px; 
+            flex-wrap: wrap;
+            align-items: flex-end;
+        }
+        .file-group { 
+            flex: 1; 
+            min-width: 200px;
+        }
+        .file-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text);
+        }
+        .file-group input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+        }
+        
+        .btn { 
+            padding: 12px 24px; 
+            background: var(--accent); 
+            color: white; 
+            border: none; 
+            cursor: pointer; 
+            border-radius: 6px; 
+            font-size: 16px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: var(--accent-hover); }
+        .btn:disabled { 
+            background: #555; 
+            cursor: not-allowed; 
+        }
+        .btn-success { background: var(--success); }
+        .btn-success:hover { background: #218838; }
+        
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 0;
+        }
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        
+        /* Status messages */
+        #status {
+            padding: 12px 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        #status.processing {
+            background: rgba(255, 193, 7, 0.2);
+            border: 1px solid var(--warning);
+            color: var(--warning);
+        }
+        #status.success {
+            background: rgba(40, 167, 69, 0.2);
+            border: 1px solid var(--success);
+            color: var(--success);
+        }
+        #status.error {
+            background: rgba(220, 53, 69, 0.2);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+        }
+        #status:empty { display: none; }
+        
+        /* Questionnaire section */
+        .questionnaire {
+            background: var(--bg-control);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+        }
+        .questionnaire-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .questionnaire-toggle h3 {
+            margin: 0;
+        }
+        .questionnaire-fields {
+            display: none;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .questionnaire-fields.open {
+            display: grid;
+        }
+        .field-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .field-group label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .field-group input,
+        .field-group select,
+        .field-group textarea {
+            padding: 8px 12px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 14px;
+        }
+        .field-group textarea {
+            min-height: 60px;
+            resize: vertical;
+        }
+        .field-group.full-width {
+            grid-column: 1 / -1;
+        }
+        
+        /* Results grid */
+        .results-grid { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 25px; 
+        }
+        @media (max-width: 1000px) {
+            .results-grid { grid-template-columns: 1fr; }
+        }
+        
+        .eye-column { 
+            background: var(--bg-card); 
+            padding: 20px; 
+            border-radius: 10px; 
+            border: 1px solid var(--border); 
+        }
+        
+        .label { 
+            font-weight: 600; 
+            color: var(--text-muted); 
+            margin-top: 15px; 
+            display: block; 
+            font-size: 0.9rem;
+        }
+        
+        .image-container {
+            margin-top: 10px;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+        .image-container img { 
+            width: 100%; 
+            display: block;
+        }
+        .image-container.hidden { display: none; }
+        
+        /* AI Analysis Results */
+        .ai-results {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+        }
+        .ai-results.hidden { display: none; }
+        
+        /* Zone cards */
+        .zones-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            margin: 15px 0;
+        }
+        @media (max-width: 600px) {
+            .zones-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        
+        .zone-card {
+            background: var(--bg-control);
+            padding: 10px;
+            border-radius: 6px;
+            border-left: 3px solid var(--border);
+            font-size: 0.85rem;
+        }
+        .zone-card.normal { border-left-color: var(--success); }
+        .zone-card.attention { border-left-color: var(--warning); }
+        .zone-card.concern { border-left-color: var(--danger); }
+        
+        .zone-card .zone-name {
+            font-weight: 600;
+            color: var(--text);
+        }
+        .zone-card .zone-organ {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+        .zone-card .zone-findings {
+            margin-top: 5px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        
+        /* System scores */
+        .systems-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 15px 0;
+        }
+        @media (max-width: 600px) {
+            .systems-grid { grid-template-columns: 1fr; }
+        }
+        
+        .system-card {
+            background: var(--bg-control);
+            padding: 12px;
+            border-radius: 6px;
+        }
+        .system-card .system-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .system-card .system-score {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 5px 0;
+        }
+        .system-card .system-desc {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .score-high { color: var(--success); }
+        .score-med { color: var(--warning); }
+        .score-low { color: var(--danger); }
+        
+        /* Artifacts list */
+        .artifacts-list {
+            margin: 15px 0;
+        }
+        .artifact-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: var(--bg-control);
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .artifact-item .artifact-type {
+            font-weight: 600;
+        }
+        .artifact-item .artifact-location {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        .artifact-item .artifact-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .severity-low { border-left: 3px solid var(--success); }
+        .severity-medium { border-left: 3px solid var(--warning); }
+        .severity-high { border-left: 3px solid var(--danger); }
+        
+        /* Advice section */
+        .advice-section {
+            background: var(--bg-control);
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+        }
+        .advice-section h4 {
+            margin: 0 0 10px 0;
+            color: var(--accent);
+            font-size: 0.95rem;
+        }
+        .advice-section ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .advice-section li {
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+        
+        /* Overall health score */
+        .overall-health {
+            text-align: center;
+            padding: 20px;
+            background: var(--bg-control);
+            border-radius: 10px;
+            margin: 15px 0;
+        }
+        .overall-health .score {
+            font-size: 3rem;
+            font-weight: 700;
+        }
+        .overall-health .label {
+            margin-top: 5px;
+            display: block;
+        }
+        
+        /* Collapsible sections */
+        .collapsible-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            padding: 10px 0;
+        }
+        .collapsible-header::after {
+            content: '▼';
+            font-size: 0.8rem;
+            transition: transform 0.2s;
+        }
+        .collapsible-header.collapsed::after {
+            transform: rotate(-90deg);
+        }
+        .collapsible-content {
+            overflow: hidden;
+            transition: max-height 0.3s;
+        }
+        .collapsible-content.collapsed {
+            max-height: 0 !important;
+        }
+        
+        /* Loading spinner */
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--text-muted);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Iridology AI Mapper</h1>
+        <h1>🔮 Иридологичен Анализатор - Iris 3.0</h1>
         
+        <!-- Image Upload Controls -->
         <div class="controls">
-            <div class="file-group">
-                <label>ДЯСНО ОКО (Right):</label>
-                <input type="file" id="fileR">
+            <div class="controls-row">
+                <div class="file-group">
+                    <label>📷 ДЯСНО ОКО (Right):</label>
+                    <input type="file" id="fileR" accept="image/*">
+                </div>
+                <div class="file-group">
+                    <label>📷 ЛЯВО ОКО (Left):</label>
+                    <input type="file" id="fileL" accept="image/*">
+                </div>
+                <div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="runAI" checked>
+                        <label for="runAI">🤖 AI Анализ</label>
+                    </div>
+                    <button class="btn btn-success" id="analyzeBtn" onclick="analyze()">
+                        АНАЛИЗИРАЙ
+                    </button>
+                </div>
             </div>
-            <div class="file-group">
-                <label>ЛЯВО ОКО (Left):</label>
-                <input type="file" id="fileL">
+        </div>
+        
+        <!-- Questionnaire Section -->
+        <div class="questionnaire">
+            <div class="questionnaire-toggle" onclick="toggleQuestionnaire()">
+                <span id="qToggleIcon">▶</span>
+                <h3>📋 Въпросник (по желание - подобрява анализа)</h3>
             </div>
-            <button class="btn" onclick="analyze()">АНАЛИЗИРАЙ</button>
+            <div class="questionnaire-fields" id="questionnaireFields">
+                <div class="field-group">
+                    <label>Възраст</label>
+                    <input type="number" id="q_age" min="1" max="120" placeholder="напр. 35">
+                </div>
+                <div class="field-group">
+                    <label>Пол</label>
+                    <select id="q_gender">
+                        <option value="">-- Изберете --</option>
+                        <option value="male">Мъж</option>
+                        <option value="female">Жена</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Ръст (см)</label>
+                    <input type="number" id="q_height" min="100" max="250" placeholder="напр. 175">
+                </div>
+                <div class="field-group">
+                    <label>Тегло (кг)</label>
+                    <input type="number" id="q_weight" min="30" max="300" placeholder="напр. 70">
+                </div>
+                <div class="field-group">
+                    <label>Ниво на стрес</label>
+                    <select id="q_stress">
+                        <option value="">-- Изберете --</option>
+                        <option value="low">Ниско</option>
+                        <option value="medium">Средно</option>
+                        <option value="high">Високо</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Часове сън</label>
+                    <input type="number" id="q_sleep" min="1" max="16" placeholder="напр. 7">
+                </div>
+                <div class="field-group">
+                    <label>Качество на съня</label>
+                    <select id="q_sleepQuality">
+                        <option value="">-- Изберете --</option>
+                        <option value="poor">Лошо</option>
+                        <option value="average">Средно</option>
+                        <option value="good">Добро</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Физическа активност</label>
+                    <select id="q_activity">
+                        <option value="">-- Изберете --</option>
+                        <option value="sedentary">Заседнал</option>
+                        <option value="light">Лека</option>
+                        <option value="moderate">Умерена</option>
+                        <option value="active">Активна</option>
+                    </select>
+                </div>
+                <div class="field-group full-width">
+                    <label>Цели от анализа</label>
+                    <textarea id="q_goals" placeholder="Какво бихте искали да научите от анализа?"></textarea>
+                </div>
+                <div class="field-group full-width">
+                    <label>Текущо здравословно състояние</label>
+                    <textarea id="q_health" placeholder="Опишете общото си здравословно състояние"></textarea>
+                </div>
+                <div class="field-group full-width">
+                    <label>Оплаквания / Симптоми</label>
+                    <textarea id="q_complaints" placeholder="Налични оплаквания или симптоми"></textarea>
+                </div>
+                <div class="field-group full-width">
+                    <label>Хранителни навици</label>
+                    <textarea id="q_diet" placeholder="Опишете накратко храненето си"></textarea>
+                </div>
+                <div class="field-group full-width">
+                    <label>Лекарства / Добавки</label>
+                    <textarea id="q_meds" placeholder="Текущи лекарства или хранителни добавки"></textarea>
+                </div>
+                <div class="field-group full-width">
+                    <label>Алергии</label>
+                    <textarea id="q_allergies" placeholder="Известни алергии"></textarea>
+                </div>
+            </div>
         </div>
 
-        <div id="status" style="margin-bottom: 10px; color: yellow;"></div>
+        <!-- Status Message -->
+        <div id="status"></div>
 
+        <!-- Results Grid -->
         <div class="results-grid">
-            <div class="eye-column">
-                <h2>RIGHT EYE</h2>
-                <span class="label">Детекция:</span>
-                <img id="ovlR">
-                <span class="label">Карта (Външни координати):</span>
-                <img id="mapR">
+            <!-- Right Eye Column -->
+            <div class="eye-column" id="resultR">
+                <h2>👁️ ДЯСНО ОКО (R)</h2>
+                
+                <span class="label">Детекция на ириса:</span>
+                <div class="image-container hidden" id="ovlContainerR">
+                    <img id="ovlR" alt="Overlay Right">
+                </div>
+                
+                <span class="label">Разгърната ирисова карта:</span>
+                <div class="image-container hidden" id="mapContainerR">
+                    <img id="mapR" alt="Map Right">
+                </div>
+                
+                <!-- AI Results for Right Eye -->
+                <div class="ai-results hidden" id="aiResultsR"></div>
             </div>
-            <div class="eye-column">
-                <h2>LEFT EYE</h2>
-                <span class="label">Детекция:</span>
-                <img id="ovlL">
-                <span class="label">Карта (Външни координати):</span>
-                <img id="mapL">
+            
+            <!-- Left Eye Column -->
+            <div class="eye-column" id="resultL">
+                <h2>👁️ ЛЯВО ОКО (L)</h2>
+                
+                <span class="label">Детекция на ириса:</span>
+                <div class="image-container hidden" id="ovlContainerL">
+                    <img id="ovlL" alt="Overlay Left">
+                </div>
+                
+                <span class="label">Разгърната ирисова карта:</span>
+                <div class="image-container hidden" id="mapContainerL">
+                    <img id="mapL" alt="Map Left">
+                </div>
+                
+                <!-- AI Results for Left Eye -->
+                <div class="ai-results hidden" id="aiResultsL"></div>
             </div>
         </div>
     </div>
 
     <script>
+        // Toggle questionnaire visibility
+        function toggleQuestionnaire() {
+            const fields = document.getElementById('questionnaireFields');
+            const icon = document.getElementById('qToggleIcon');
+            fields.classList.toggle('open');
+            icon.textContent = fields.classList.contains('open') ? '▼' : '▶';
+        }
+        
+        // Collect questionnaire data
+        function getQuestionnaire() {
+            const q = {};
+            const age = document.getElementById('q_age').value;
+            if (age) q.age = parseInt(age);
+            
+            const gender = document.getElementById('q_gender').value;
+            if (gender) q.gender = gender;
+            
+            const height = document.getElementById('q_height').value;
+            if (height) q.height = parseInt(height);
+            
+            const weight = document.getElementById('q_weight').value;
+            if (weight) q.weight = parseInt(weight);
+            
+            // Calculate BMI if both height and weight are provided
+            if (height && weight) {
+                const h = parseInt(height) / 100;
+                q.bmi = Math.round(parseInt(weight) / (h * h) * 10) / 10;
+            }
+            
+            const stress = document.getElementById('q_stress').value;
+            if (stress) q.stressLevel = stress;
+            
+            const sleep = document.getElementById('q_sleep').value;
+            if (sleep) q.sleepHours = parseInt(sleep);
+            
+            const sleepQ = document.getElementById('q_sleepQuality').value;
+            if (sleepQ) q.sleepQuality = sleepQ;
+            
+            const activity = document.getElementById('q_activity').value;
+            if (activity) q.activityLevel = activity;
+            
+            const goals = document.getElementById('q_goals').value.trim();
+            if (goals) q.goals = goals;
+            
+            const health = document.getElementById('q_health').value.trim();
+            if (health) q.healthStatus = health;
+            
+            const complaints = document.getElementById('q_complaints').value.trim();
+            if (complaints) q.complaints = complaints;
+            
+            const diet = document.getElementById('q_diet').value.trim();
+            if (diet) q.dietaryHabits = diet;
+            
+            const meds = document.getElementById('q_meds').value.trim();
+            if (meds) q.medications = meds;
+            
+            const allergies = document.getElementById('q_allergies').value.trim();
+            if (allergies) q.allergies = allergies;
+            
+            return Object.keys(q).length > 0 ? q : null;
+        }
+        
+        // Set status message
+        function setStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = type || '';
+        }
+        
+        // Get score color class
+        function getScoreClass(score) {
+            if (score >= 70) return 'score-high';
+            if (score >= 40) return 'score-med';
+            return 'score-low';
+        }
+        
+        // Render AI analysis results
+        function renderAIResults(container, aiData) {
+            if (!aiData || aiData.error) {
+                container.innerHTML = `
+                    <h3>⚠️ AI Анализ</h3>
+                    <p style="color: var(--danger);">
+                        ${aiData?.error?.message || aiData?.error || 'Грешка при AI анализа'}
+                    </p>
+                `;
+                container.classList.remove('hidden');
+                return;
+            }
+            
+            const result = aiData.result || aiData;
+            const report = result.report;
+            
+            if (!report || !report.analysis) {
+                container.innerHTML = `
+                    <h3>⚠️ AI Анализ</h3>
+                    <p style="color: var(--warning);">Резултатите от анализа не са налични.</p>
+                    <details>
+                        <summary>Debug данни</summary>
+                        <pre style="font-size: 0.7rem; overflow: auto;">${JSON.stringify(result, null, 2)}</pre>
+                    </details>
+                `;
+                container.classList.remove('hidden');
+                return;
+            }
+            
+            const analysis = report.analysis;
+            const advice = report.advice || {};
+            
+            let html = `<h3>🔬 AI Иридологичен Анализ</h3>`;
+            
+            // Overall Health Score
+            if (analysis.overallHealth !== undefined) {
+                html += `
+                    <div class="overall-health">
+                        <div class="score ${getScoreClass(analysis.overallHealth)}">${analysis.overallHealth}</div>
+                        <span class="label">Общ здравен индекс</span>
+                    </div>
+                `;
+            }
+            
+            // Zones
+            if (analysis.zones && analysis.zones.length > 0) {
+                html += `
+                    <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                        <h3>🎯 Зони на ириса (${analysis.zones.length})</h3>
+                    </div>
+                    <div class="collapsible-content">
+                        <div class="zones-grid">
+                `;
+                analysis.zones.forEach(zone => {
+                    html += `
+                        <div class="zone-card ${zone.status || 'normal'}">
+                            <div class="zone-name">${zone.name || 'Зона ' + zone.id}</div>
+                            <div class="zone-organ">${zone.organ || ''}</div>
+                            ${zone.findings ? `<div class="zone-findings">${zone.findings}</div>` : ''}
+                        </div>
+                    `;
+                });
+                html += `</div></div>`;
+            }
+            
+            // System Scores
+            if (analysis.systemScores && analysis.systemScores.length > 0) {
+                html += `
+                    <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                        <h3>📊 Оценка на системите</h3>
+                    </div>
+                    <div class="collapsible-content">
+                        <div class="systems-grid">
+                `;
+                analysis.systemScores.forEach(sys => {
+                    html += `
+                        <div class="system-card">
+                            <div class="system-name">${sys.system}</div>
+                            <div class="system-score ${getScoreClass(sys.score)}">${sys.score}</div>
+                            <div class="system-desc">${sys.description || ''}</div>
+                        </div>
+                    `;
+                });
+                html += `</div></div>`;
+            }
+            
+            // Artifacts
+            if (analysis.artifacts && analysis.artifacts.length > 0) {
+                html += `
+                    <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                        <h3>🔍 Открити структури (${analysis.artifacts.length})</h3>
+                    </div>
+                    <div class="collapsible-content">
+                        <div class="artifacts-list">
+                `;
+                analysis.artifacts.forEach(art => {
+                    html += `
+                        <div class="artifact-item severity-${art.severity || 'low'}">
+                            <div>
+                                <span class="artifact-type">${art.type}</span>
+                                <span class="artifact-location"> @ ${art.location}</span>
+                            </div>
+                            <div class="artifact-desc">${art.description || ''}</div>
+                        </div>
+                    `;
+                });
+                html += `</div></div>`;
+            }
+            
+            // Advice
+            if (advice && (advice.priorities || advice.nutrition || advice.lifestyle || advice.followUp)) {
+                html += `
+                    <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                        <h3>💡 Препоръки</h3>
+                    </div>
+                    <div class="collapsible-content">
+                `;
+                
+                if (advice.priorities && advice.priorities.length > 0) {
+                    html += `
+                        <div class="advice-section">
+                            <h4>🎯 Приоритети</h4>
+                            <ul>${advice.priorities.map(p => `<li>${p}</li>`).join('')}</ul>
+                        </div>
+                    `;
+                }
+                
+                if (advice.nutrition) {
+                    html += `<div class="advice-section"><h4>🥗 Хранене</h4>`;
+                    if (advice.nutrition.focus && advice.nutrition.focus.length > 0) {
+                        html += `<p><strong>Фокус:</strong></p><ul>${advice.nutrition.focus.map(f => `<li>${f}</li>`).join('')}</ul>`;
+                    }
+                    if (advice.nutrition.limit && advice.nutrition.limit.length > 0) {
+                        html += `<p><strong>Ограничете:</strong></p><ul>${advice.nutrition.limit.map(l => `<li>${l}</li>`).join('')}</ul>`;
+                    }
+                    html += `</div>`;
+                }
+                
+                if (advice.lifestyle) {
+                    html += `<div class="advice-section"><h4>🏃 Начин на живот</h4>`;
+                    if (advice.lifestyle.sleep && advice.lifestyle.sleep.length > 0) {
+                        html += `<p><strong>Сън:</strong></p><ul>${advice.lifestyle.sleep.map(s => `<li>${s}</li>`).join('')}</ul>`;
+                    }
+                    if (advice.lifestyle.stress && advice.lifestyle.stress.length > 0) {
+                        html += `<p><strong>Стрес:</strong></p><ul>${advice.lifestyle.stress.map(s => `<li>${s}</li>`).join('')}</ul>`;
+                    }
+                    if (advice.lifestyle.activity && advice.lifestyle.activity.length > 0) {
+                        html += `<p><strong>Активност:</strong></p><ul>${advice.lifestyle.activity.map(a => `<li>${a}</li>`).join('')}</ul>`;
+                    }
+                    html += `</div>`;
+                }
+                
+                if (advice.followUp && advice.followUp.length > 0) {
+                    html += `
+                        <div class="advice-section">
+                            <h4>📋 Последващи действия</h4>
+                            <ul>${advice.followUp.map(f => `<li>${f}</li>`).join('')}</ul>
+                        </div>
+                    `;
+                }
+                
+                html += `</div>`;
+            }
+            
+            container.innerHTML = html;
+            container.classList.remove('hidden');
+        }
+        
+        // Toggle collapsible sections
+        function toggleCollapsible(header) {
+            header.classList.toggle('collapsed');
+            const content = header.nextElementSibling;
+            if (content.style.maxHeight) {
+                content.style.maxHeight = null;
+            } else {
+                content.style.maxHeight = content.scrollHeight + 'px';
+            }
+        }
+        
+        // Main analysis function
         async function analyze() {
             const fR = document.getElementById('fileR').files[0];
             const fL = document.getElementById('fileL').files[0];
             
-            if(!fR && !fL) {
+            if (!fR && !fL) {
                 alert("Моля изберете поне една снимка!");
                 return;
             }
-
+            
+            const runAI = document.getElementById('runAI').checked;
+            const questionnaire = getQuestionnaire();
+            
+            // Prepare form data
             const fd = new FormData();
-            if(fR) fd.append('image_right', fR);
-            if(fL) fd.append('image_left', fL);
-
-            document.getElementById('status').innerText = "Обработка...";
+            if (fR) fd.append('image_right', fR);
+            if (fL) fd.append('image_left', fL);
+            fd.append('run_ai', runAI ? 'true' : 'false');
+            if (questionnaire) {
+                fd.append('questionnaire', JSON.stringify(questionnaire));
+            }
+            
+            // Update UI
+            const btn = document.getElementById('analyzeBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span>Анализиране...';
+            
+            setStatus(runAI ? 'Обработка на изображенията и AI анализ... (може да отнеме до 2 минути)' : 'Обработка на изображенията...', 'processing');
+            
+            // Hide previous results
+            ['R', 'L'].forEach(side => {
+                document.getElementById('ovlContainer' + side).classList.add('hidden');
+                document.getElementById('mapContainer' + side).classList.add('hidden');
+                document.getElementById('aiResults' + side).classList.add('hidden');
+            });
             
             try {
                 const res = await fetch('/process', { method: 'POST', body: fd });
                 const data = await res.json();
                 
-                const show = (side, d) => {
-                    if(d && d.found) {
-                        const ovl = document.getElementById('ovl' + side);
-                        const map = document.getElementById('map' + side);
-                        ovl.src = 'data:image/jpeg;base64,' + d.overlay;
-                        map.src = 'data:image/jpeg;base64,' + d.mapped;
-                        ovl.style.display = 'block';
-                        map.style.display = 'block';
+                // Show results for each eye
+                const showResults = (side, d) => {
+                    if (d && d.found) {
+                        const ovlImg = document.getElementById('ovl' + side);
+                        const mapImg = document.getElementById('map' + side);
+                        const ovlContainer = document.getElementById('ovlContainer' + side);
+                        const mapContainer = document.getElementById('mapContainer' + side);
+                        
+                        ovlImg.src = 'data:image/jpeg;base64,' + d.overlay;
+                        mapImg.src = 'data:image/jpeg;base64,' + d.mapped;
+                        ovlContainer.classList.remove('hidden');
+                        mapContainer.classList.remove('hidden');
+                        
+                        // Show AI results if available
+                        if (d.ai_analysis) {
+                            const aiContainer = document.getElementById('aiResults' + side);
+                            renderAIResults(aiContainer, d.ai_analysis);
+                        }
+                    } else if (d && d.error) {
+                        const aiContainer = document.getElementById('aiResults' + side);
+                        aiContainer.innerHTML = `<p style="color: var(--danger);">⚠️ ${d.error}</p>`;
+                        aiContainer.classList.remove('hidden');
                     }
                 };
-
-                show('R', data.R);
-                show('L', data.L);
                 
-                document.getElementById('status').innerText = "Готово.";
-            } catch(e) {
-                document.getElementById('status').innerText = "Грешка: " + e.message;
+                showResults('R', data.R);
+                showResults('L', data.L);
+                
+                // Set appropriate status message
+                let statusMsg = "Готово! ";
+                if (data.R?.found || data.L?.found) {
+                    statusMsg += "Изображенията са обработени успешно.";
+                    if (runAI) {
+                        if (!data.worker_configured) {
+                            statusMsg += " ⚠️ AI анализът не е конфигуриран (задайте IRIS_WORKER_URL).";
+                        } else if (data.R?.ai_analysis || data.L?.ai_analysis) {
+                            statusMsg += " AI анализът е завършен.";
+                        }
+                    }
+                    setStatus(statusMsg, 'success');
+                } else {
+                    setStatus("Не беше открит ирис в нито една от снимките.", 'error');
+                }
+                
+            } catch (e) {
+                setStatus("Грешка: " + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = 'АНАЛИЗИРАЙ';
             }
         }
     </script>
