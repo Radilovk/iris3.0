@@ -1,4 +1,7 @@
-IRIS PIPELINE PROMPTS v9 (FINAL)
+IRIS PIPELINE PROMPTS v9.1 (FINAL)
+
+NOTE: v9.1 adds STEP2B_ANW — detailed ANW collarette contour profiler.
+Pipeline steps: STEP1 → STEP2A + STEP2B + STEP2B_ANW (parallel) → STEP2C → STEP3 → STEP4 → STEP5
 
 
 ================================================================================
