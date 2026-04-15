@@ -10,7 +10,7 @@
  *   IRIS_KV         — KV namespace for caching results
  *   AI_API_KEY      — secret: API key (OpenAI or Google Gemini)
  *   AI_PROVIDER     — var: provider name ("openai", "gemini", "openai-compatible")
- *   AI_MODEL        — var: model name (e.g., "gemini-2.0-flash-exp", "gpt-4o", "gpt-4o-mini")
+ *   AI_MODEL        — var: model name (e.g., "gemini-2.0-flash", "gpt-4o", "gpt-4o-mini")
  *   AI_BASE_URL     — var: OpenAI API base URL (default: "https://api.openai.com/v1")
  *   GEMINI_API_URL  — var: Gemini API base URL (default: "https://generativelanguage.googleapis.com/v1beta")
  *
@@ -90,11 +90,12 @@ const AVAILABLE_MODELS = {
   gemini: {
     name: 'Google Gemini',
     models: [
-      { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash Exp', recommended: true, vision: true },
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', recommended: true, vision: true },
+      { id: 'gemini-2.5-flash-preview-04-17', name: 'Gemini 2.5 Flash Preview', vision: true },
       { id: 'gemini-2.5-flash-latest', name: 'Gemini 2.5 Flash Latest', vision: true },
+      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', vision: true, costEffective: true },
       { id: 'gemini-1.5-pro-latest', name: 'Gemini 1.5 Pro Latest', vision: true },
       { id: 'gemini-1.5-flash-latest', name: 'Gemini 1.5 Flash Latest', vision: true },
-      { id: 'gemini-pro-vision', name: 'Gemini Pro Vision', vision: true },
     ]
   },
   openai: {
@@ -124,7 +125,7 @@ const AVAILABLE_MODELS = {
 // =====================================================================
 function handleGetModels(env) {
   const currentProvider = env.AI_PROVIDER || 'gemini';
-  const currentModel = env.AI_MODEL || 'gemini-2.0-flash-exp';
+  const currentModel = env.AI_MODEL || 'gemini-2.0-flash';
   
   return jsonResp({
     currentConfig: {
@@ -142,7 +143,7 @@ function handleGetModels(env) {
 function handleHealthCheck(env) {
   const hasApiKey = !!env.AI_API_KEY;
   const provider = env.AI_PROVIDER || 'gemini';
-  const model = env.AI_MODEL || 'gemini-2.0-flash-exp';
+  const model = env.AI_MODEL || 'gemini-2.0-flash';
   
   return jsonResp({
     status: hasApiKey ? 'healthy' : 'degraded',
@@ -216,7 +217,7 @@ function createEffectiveEnv(env, aiProvider, aiModel) {
     // Override AI_PROVIDER if specified in request
     AI_PROVIDER: aiProvider || env.AI_PROVIDER || 'gemini',
     // Override AI_MODEL if specified in request
-    AI_MODEL: aiModel || env.AI_MODEL || 'gemini-2.0-flash-exp',
+    AI_MODEL: aiModel || env.AI_MODEL || 'gemini-2.0-flash',
   };
 }
 
@@ -358,7 +359,7 @@ async function aiCallOpenAI(env, prompt, imageDataUrl) {
 // Google Gemini API call
 // =====================================================================
 async function aiCallGemini(env, prompt, imageDataUrl) {
-  const model = env.AI_MODEL || 'gemini-2.0-flash-exp';
+  const model = env.AI_MODEL || 'gemini-2.0-flash';
   const baseUrl = env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta';
   
   // Prepare content parts

@@ -119,7 +119,7 @@ function validateModelOptions() {
   
   // Check for documented model options
   const recommendedModels = [
-    'gemini-2.0-flash-exp',
+    'gemini-2.0-flash',
     'gemini-2.5-flash-latest',
     'gpt-4o',
     'gpt-4o-mini'
