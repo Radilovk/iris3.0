@@ -209,7 +209,8 @@ wrangler deploy
 
 | Доставчик | Модел | Описание |
 |-----------|-------|----------|
-| **Google Gemini** | `gemini-2.0-flash-exp` | Препоръчан - експериментален |
+| **Google Gemini** | `gemini-2.0-flash` | Препоръчан - стабилен |
+| | `gemini-2.5-flash-preview-04-17` | Нов 2.5 Flash Preview |
 | | `gemini-2.5-flash-latest` | Стабилен, 1M контекст |
 | | `gemini-1.5-pro-latest` | Pro версия |
 | | `gemini-1.5-flash-latest` | Бърз |
@@ -229,7 +230,7 @@ wrangler deploy
 - **Оптимизация:** Големите изображения се компресират за оптимална производителност
 
 #### 🎯 Препоръчан: Google Gemini 2.0 Flash
-- **Модел:** `gemini-2.0-flash-exp` (експериментален) или `gemini-2.5-flash-latest` (стабилен)
+- **Модел:** `gemini-2.0-flash` (стабилен, препоръчан) или `gemini-2.5-flash-preview-04-17` (най-нов)
 - **Предимства:**
   - 1 милион токена контекст (срещу 128K)
   - До 3000 изображения на запитване
@@ -277,8 +278,8 @@ Cloudflare Worker предоставя следните endpoints:
 # Избор на провайдер: "openai", "gemini", или "openai-compatible"
 AI_PROVIDER = "gemini"
 
-# Модел (препоръчан: gemini-2.0-flash-exp)
-AI_MODEL = "gemini-2.0-flash-exp"
+# Модел (препоръчан: gemini-2.0-flash)
+AI_MODEL = "gemini-2.0-flash"
 
 # API URLs
 AI_BASE_URL = "https://api.openai.com/v1"
@@ -292,7 +293,7 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 | `IRIS_WORKER_URL` | URL на Cloudflare Worker | (празно) |
 | `IRIS_WORKER_TIMEOUT` | Timeout в секунди | 120 |
 | `AI_PROVIDER` | AI провайдер | gemini |
-| `AI_MODEL` | AI модел | gemini-2.0-flash-exp |
+| `AI_MODEL` | AI модел | gemini-2.0-flash |
 | `AI_BASE_URL` | OpenAI API endpoint | https://api.openai.com/v1 |
 | `GEMINI_API_URL` | Gemini API endpoint | https://generativelanguage.googleapis.com/v1beta |
 
