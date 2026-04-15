@@ -1,9 +1,9 @@
 /**
  * worker.js — Cloudflare Worker
- * Iris Iridology Analysis Pipeline v9
+ * Iris Iridology Analysis Pipeline v9.1
  *
  * Architecture:
- *   1. POST /analyze  — receive unwrapped iris strip + metadata, run 5-step AI pipeline
+ *   1. POST /analyze  — receive unwrapped iris strip + metadata, run 6-step AI pipeline
  *   2. GET  /result/:side/:hash — retrieve a cached analysis result
  *
  * Environment bindings (set in wrangler.toml / Cloudflare dashboard):
@@ -26,6 +26,16 @@
  *   X-axis:  minutes 0–60 (left=0=12 o'clock, right=60=12 o'clock)
  *   Y-axis:  rings R0–R11 (top=R0=innermost, bottom=R11=outermost)
  *   Labels:  minute ticks at top, R0–R11 at left, NASAL/TEMPORAL at bottom
+ *
+ * Pipeline steps:
+ *   STEP1      — geo calibration (vision)
+ *   STEP2A     — structural detector (vision, parallel)
+ *   STEP2B     — pigment/rings detector (vision, parallel)
+ *   STEP2B_ANW — ANW collarette contour profiler (vision, parallel)
+ *   STEP2C     — consistency validator (text)
+ *   STEP3      — zone mapper (text)
+ *   STEP4      — profile builder (text)
+ *   STEP5      — Bulgarian report (text)
  */
 
 // =====================================================================
@@ -136,7 +146,7 @@ function handleHealthCheck(env) {
   
   return jsonResp({
     status: hasApiKey ? 'healthy' : 'degraded',
-    version: 'v9',
+    version: 'v9.1',
     provider,
     model,
     apiKeyConfigured: hasApiKey,
@@ -242,19 +252,20 @@ class IrisPipeline {
       return { error: step1, stage: 'STEP1', imageHash: this.imageHash, side: this.side };
     }
 
-    // STEP 2A + 2B — parallel structural + pigment detection (both need image)
-    const [step2a, step2b] = await Promise.all([
+    // STEP 2A + 2B + 2B_ANW — parallel: structural + pigment + ANW contour (all need image)
+    const [step2a, step2b, step2anw] = await Promise.all([
       this.visionCall(promptStep2A(this.side, step1)),
       this.visionCall(promptStep2B(this.side, step1)),
+      this.visionCall(promptStep2B_ANW(this.side, step1)),
     ]);
 
-    // STEP 2C — consistency validator (text only)
-    const step2c = await this.textCall(promptStep2C(this.side, step1, step2a, step2b));
+    // STEP 2C — consistency validator (text only, now includes ANW contour)
+    const step2c = await this.textCall(promptStep2C(this.side, step1, step2a, step2b, step2anw));
 
     // STEP 3 — mapper (text only)
     const step3 = await this.textCall(promptStep3(this.side, step1, step2c));
 
-    // STEP 4 — profile builder (text only)
+    // STEP 4 — profile builder (text only, now includes ANW contour)
     const step4 = await this.textCall(promptStep4(this.side, step3, step2c));
 
     // STEP 5 — final Bulgarian report (text only)
@@ -265,7 +276,7 @@ class IrisPipeline {
     return {
       imageHash: this.imageHash,
       side: this.side,
-      pipeline: { step1, step2a, step2b, step2c, step3, step4 },
+      pipeline: { step1, step2a, step2b, step2anw, step2c, step3, step4 },
       report: step5,
     };
   }
@@ -806,7 +817,129 @@ If GEO.ok != true: {"error":{"stage":"STEP2B","code":"PREREQ_FAIL","message":"ge
 If cannot comply: {"error":{"stage":"STEP2B","code":"FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
 }
 
-function promptStep2C(side, step1, step2a, step2b) {
+function promptStep2B_ANW(side, step1) {
+  return `${IMAGE_FORMAT}
+
+================================================================================
+STEP2B_ANW_contour_profiler
+================================================================================
+
+ROLE: iris_ANW_contour_profiler_v9
+MODE: image_parse_only
+INPUT: unwrapped_iris_strip — rectangular image as described in IMAGE_FORMAT above
+SIDE: ${side}
+GEO: ${JSON.stringify(step1)}
+
+PREREQ: If GEO.ok != true → return error JSON immediately.
+
+TARGET: DETAILED ANW / COLLARETTE CONTOUR PROFILING — segment by segment.
+This step ONLY examines the collarette (autonomic nerve wreath) — the wavy band
+visible in rows R2–R3 (approximately 50–100 px from the top of the 300 px iris content).
+
+IGNORE: White/blank eyelid-masked bands | glare/specular patches | GEO.invalidRegions
+DO NOT report findings outside the R1–R4 range. Focus ONLY on the collarette region.
+
+WHY THIS MATTERS:
+In iridology the collarette is the single most important landmark. Its shape varies
+LOCALLY — it may be expanded (pushed toward R3–R4) in one sector and contracted
+(pulled toward R1) in another. Breaks, notches, and ballooning are significant per-sector.
+A single global "expanded | contracted | broken | normal" label is insufficient.
+
+SEGMENTATION — divide the strip into 12 equal segments of 5 minutes each:
+  Segment  1: minutes  0– 5   (12:00–1:00)
+  Segment  2: minutes  5–10   (1:00–2:00)
+  Segment  3: minutes 10–15   (2:00–3:00)
+  Segment  4: minutes 15–20   (3:00–4:00)
+  Segment  5: minutes 20–25   (4:00–5:00)
+  Segment  6: minutes 25–30   (5:00–6:00)
+  Segment  7: minutes 30–35   (6:00–7:00)
+  Segment  8: minutes 35–40   (7:00–8:00)
+  Segment  9: minutes 40–45   (8:00–9:00)
+  Segment 10: minutes 45–50   (9:00–10:00)
+  Segment 11: minutes 50–55   (10:00–11:00)
+  Segment 12: minutes 55–60   (11:00–12:00)
+
+For EACH visible segment (not masked by white/eyelid):
+
+1. POSITION — Where is the center of the collarette band in this segment?
+   - "high" = band center near R2 (contracted toward pupil)
+   - "mid"  = band center between R2 and R3 (normal position)
+   - "low"  = band center near R3 or beyond (expanded toward periphery)
+   Report the approximate ring position as a decimal (e.g., 2.3, 2.8, 3.1).
+
+2. SHAPE — What is the local shape of the collarette?
+   - "normal"     = smooth, continuous, well-defined wavy band
+   - "expanded"   = band pushed outward (toward R3–R4), wider than average
+   - "contracted" = band pulled inward (toward R1–R2), thinner than average
+   - "broken"     = clear gap or discontinuity in the band
+   - "notched"    = V-shaped indentation cutting into the band
+   - "ballooning" = localized outward bulge (mushroom-shaped protrusion)
+   - "flattened"  = band is present but indistinct, texture reduced
+
+3. THICKNESS — Estimated band thickness:
+   - "thin"   = less than ~15 px (< 0.6 rings)
+   - "normal" = ~15–30 px (0.6–1.2 rings)
+   - "thick"  = > 30 px (> 1.2 rings)
+
+4. INTEGRITY — Is the collarette border sharp and well-defined?
+   - "sharp"  = clear boundary between collarette and surrounding tissue
+   - "fuzzy"  = gradual, blurred transition
+   - "absent" = cannot distinguish collarette in this segment
+
+5. If segment is fully masked (white/eyelid/glare) → set visible=false, skip other fields.
+
+LOCALIZATION (CRITICAL):
+- Read minute position from TOP tick labels.
+- Read ring position from LEFT R-labels (R0 at top).
+- DO NOT use atan2, radial distance, or circular geometry.
+
+OUTPUT_JSON ONLY:
+{
+  "imgId": "${step1.imgId || ''}",
+  "side": "${side}",
+  "ANW_global_status": "expanded|contracted|broken|normal|mixed|unclear",
+  "ANW_global_confidence": 0.0,
+  "segments": [
+    {
+      "seg": 1,
+      "minuteRange": [0, 5],
+      "visible": true,
+      "position": "high|mid|low",
+      "ringCenter": 2.5,
+      "shape": "normal|expanded|contracted|broken|notched|ballooning|flattened",
+      "thickness": "thin|normal|thick",
+      "integrity": "sharp|fuzzy|absent",
+      "defects": [],
+      "notes": "<=60 chars",
+      "confidence": 0.0
+    }
+  ],
+  "defects": [
+    {
+      "type": "break|notch|ballooning|lesion|pigment_on_ANW",
+      "minuteRange": [0, 0],
+      "ringRange": [2, 3],
+      "notes": "<=60 chars",
+      "confidence": 0.0
+    }
+  ],
+  "contourSummary": {
+    "avgRingCenter": 2.5,
+    "minRingCenter": 2.0,
+    "maxRingCenter": 3.0,
+    "expandedSegments": [],
+    "contractedSegments": [],
+    "brokenSegments": [],
+    "overallIntegrity": "good|moderate|poor"
+  }
+}
+
+FAILSAFE:
+If GEO.ok != true: {"error":{"stage":"STEP2B_ANW","code":"PREREQ_FAIL","message":"geo not ok","canRetry":true}}
+If cannot comply: {"error":{"stage":"STEP2B_ANW","code":"FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
+}
+
+function promptStep2C(side, step1, step2a, step2b, step2anw) {
   return `IRIS PIPELINE — STEP2C_consistency_validator
 
 ROLE: iris_consistency_validator_v9
@@ -816,10 +949,12 @@ INPUTS:
   GEO    = ${JSON.stringify(step1)}
   STRUCT = ${JSON.stringify(step2a)}
   PIG    = ${JSON.stringify(step2b)}
+  ANW_CONTOUR = ${JSON.stringify(step2anw)}
 
 PREREQ:
 - If GEO.ok != true → return error JSON.
 - If STRUCT.error or PIG.error exists → return error JSON.
+- ANW_CONTOUR.error is non-fatal: if present, use PIG.collarette as fallback for collarette data.
 
 CONTEXT — COORDINATE SYSTEM:
 All minuteRange values are X-axis positions in the UNWRAPPED STRIP (0=left edge=12 o'clock,
@@ -829,7 +964,19 @@ There are no circles, no limbus, no radial distances in this coordinate system.
 PURPOSE:
 - Remove contradictions, duplicates, and range errors from STRUCT and PIG findings.
 - Normalize all ranges (no wrap), clamp values, merge duplicates.
+- Integrate detailed ANW contour data from ANW_CONTOUR into collarette_clean.
 - Do NOT add new findings. Only keep / merge / split / drop existing ones.
+
+ANW CONTOUR INTEGRATION:
+- If ANW_CONTOUR is valid (no error), use its per-segment data to build collarette_clean:
+  - ANW_status: use ANW_CONTOUR.ANW_global_status (prefer over PIG.collarette.ANW_status).
+  - segments: pass through ANW_CONTOUR.segments (only visible ones).
+  - defects: pass through ANW_CONTOUR.defects after range normalization.
+  - contourSummary: pass through ANW_CONTOUR.contourSummary.
+  - Cross-check: if PIG.collarette.ANW_status contradicts ANW_CONTOUR.ANW_global_status,
+    prefer ANW_CONTOUR (it has per-segment detail) and add a warning.
+- If ANW_CONTOUR has error: fall back to PIG.collarette for basic ANW_status only.
+  Set segments=[], defects=[], contourSummary=null.
 
 LIMITS:
 - maxFindingsOut = 60. If > 60 after cleanup: keep highest confidence first.
@@ -843,6 +990,8 @@ CONTRADICTION RULES:
 3) lymphatic_rosary vs brushfield_like_spots: same area → keep rosary only if clearly
    a chain/arc of discrete nodules; otherwise keep brushfield.
 4) Specular contamination: drop any finding that overlaps GEO.invalidRegions > 25%.
+5) collarette_defect_lesion (from STRUCT) vs ANW_CONTOUR.defects: if same minuteRange,
+   merge — keep the ANW_CONTOUR defect detail, combine notes.
 
 DEDUP / MERGE:
 - Same type + minute overlap > 60% AND ring overlap > 60% → merge ranges (union),
@@ -871,10 +1020,41 @@ OUTPUT_JSON ONLY:
     { "type": "...", "subtype": "...", "minuteRange": [0, 0], "ringRange": [0, 0], "severity": "low|medium|high", "notes": "<=60 chars", "confidence": 0.0 }
   ],
   "collarette_clean": {
-    "ANW_status": "expanded|contracted|broken|normal|unclear",
+    "ANW_status": "expanded|contracted|broken|normal|mixed|unclear",
     "minuteRange": [0, 59],
     "ringRange": [2, 3],
-    "confidence": 0.0
+    "confidence": 0.0,
+    "segments": [
+      {
+        "seg": 1,
+        "minuteRange": [0, 5],
+        "visible": true,
+        "position": "high|mid|low",
+        "ringCenter": 2.5,
+        "shape": "normal|expanded|contracted|broken|notched|ballooning|flattened",
+        "thickness": "thin|normal|thick",
+        "integrity": "sharp|fuzzy|absent",
+        "confidence": 0.0
+      }
+    ],
+    "defects": [
+      {
+        "type": "break|notch|ballooning|lesion|pigment_on_ANW",
+        "minuteRange": [0, 0],
+        "ringRange": [2, 3],
+        "notes": "<=60 chars",
+        "confidence": 0.0
+      }
+    ],
+    "contourSummary": {
+      "avgRingCenter": 2.5,
+      "minRingCenter": 2.0,
+      "maxRingCenter": 3.0,
+      "expandedSegments": [],
+      "contractedSegments": [],
+      "brokenSegments": [],
+      "overallIntegrity": "good|moderate|poor"
+    }
   },
   "global_clean": {
     "constitution": "LYM|HEM|BIL|unclear",
@@ -896,36 +1076,55 @@ FAILSAFE:
 //              organ_bg (Bulgarian), system_bg (Bulgarian).
 const MAP_V9 = [
   // ── Bilateral / ANY side ──────────────────────────────────────────
-  { id: 'ANY-stomach',   side: 'ANY', mins: [0,  59], rings: [1,  1],  organ_bg: 'Стомах',                     system_bg: 'Храносмилателна' },
-  { id: 'ANY-ANW',       side: 'ANY', mins: [0,  59], rings: [2,  3],  organ_bg: 'Автономна нервна система',   system_bg: 'Нервна' },
-  { id: 'ANY-LYM',       side: 'ANY', mins: [0,  59], rings: [10, 10], organ_bg: 'Лимфна система',             system_bg: 'Имунна' },
-  { id: 'ANY-SCU',       side: 'ANY', mins: [0,  59], rings: [11, 11], organ_bg: 'Кожа / Детоксикация',        system_bg: 'Детоксикация' },
+  { id: 'ANY-stomach',      side: 'ANY', mins: [0,  59], rings: [1,  1],  organ_bg: 'Стомах',                     system_bg: 'Храносмилателна' },
+  { id: 'ANY-sm-intest',    side: 'ANY', mins: [0,  59], rings: [3,  4],  organ_bg: 'Тънко черво',                 system_bg: 'Храносмилателна' },
+  { id: 'ANY-ANW',          side: 'ANY', mins: [0,  59], rings: [2,  3],  organ_bg: 'Автономна нервна система',   system_bg: 'Нервна' },
+  { id: 'ANY-LYM',          side: 'ANY', mins: [0,  59], rings: [10, 10], organ_bg: 'Лимфна система',             system_bg: 'Имунна' },
+  { id: 'ANY-SCU',          side: 'ANY', mins: [0,  59], rings: [11, 11], organ_bg: 'Кожа / Детоксикация',        system_bg: 'Детоксикация' },
+  { id: 'ANY-spine-cerv-u', side: 'ANY', mins: [56, 59], rings: [8, 10],  organ_bg: 'Гръбначен стълб (шиен)',     system_bg: 'Опорно-двигателна' },
+  { id: 'ANY-spine-cerv-l', side: 'ANY', mins: [0,  4],  rings: [8, 10],  organ_bg: 'Гръбначен стълб (шиен)',     system_bg: 'Опорно-двигателна' },
   // ── RIGHT EYE ─────────────────────────────────────────────────────
-  { id: 'R-brain-motor', side: 'R',   mins: [0,  3],  rings: [4,  9],  organ_bg: 'Мозък (моторни зони)',       system_bg: 'Нервна' },
-  { id: 'R-brain-sens',  side: 'R',   mins: [57, 59], rings: [4,  9],  organ_bg: 'Мозък (сетивни зони)',       system_bg: 'Нервна' },
-  { id: 'R-sinus',       side: 'R',   mins: [2,  6],  rings: [4,  7],  organ_bg: 'Синуси (десни)',             system_bg: 'Дихателна' },
-  { id: 'R-eye-ear',     side: 'R',   mins: [10, 17], rings: [4,  7],  organ_bg: 'Ухо / Очи',                 system_bg: 'Нервна' },
-  { id: 'R-shoulder',    side: 'R',   mins: [18, 22], rings: [4,  9],  organ_bg: 'Рамо (дясно)',               system_bg: 'Опорно-двигателна' },
-  { id: 'R-lung',        side: 'R',   mins: [20, 30], rings: [4,  7],  organ_bg: 'Бял дроб (десен)',           system_bg: 'Дихателна' },
-  { id: 'R-liver',       side: 'R',   mins: [23, 35], rings: [4,  9],  organ_bg: 'Черен дроб',                 system_bg: 'Детоксикация' },
-  { id: 'R-gallbladder', side: 'R',   mins: [27, 33], rings: [5,  8],  organ_bg: 'Жлъчен мехур',               system_bg: 'Детоксикация' },
-  { id: 'R-colon-asc',   side: 'R',   mins: [28, 40], rings: [4,  9],  organ_bg: 'Дебело черво (възходящо)',   system_bg: 'Храносмилателна' },
-  { id: 'R-kidney',      side: 'R',   mins: [38, 48], rings: [4,  9],  organ_bg: 'Бъбрек (десен)',             system_bg: 'Отделителна' },
-  { id: 'R-adrenal',     side: 'R',   mins: [40, 46], rings: [5,  8],  organ_bg: 'Надбъбречна жлеза (дясна)', system_bg: 'Ендокринна' },
-  { id: 'R-hip',         side: 'R',   mins: [43, 50], rings: [4,  9],  organ_bg: 'Тазобедрена става (дясна)', system_bg: 'Опорно-двигателна' },
+  { id: 'R-brain-motor',    side: 'R',   mins: [0,  3],  rings: [4,  9],  organ_bg: 'Мозък (моторни зони)',       system_bg: 'Нервна' },
+  { id: 'R-brain-sens',     side: 'R',   mins: [57, 59], rings: [4,  9],  organ_bg: 'Мозък (сетивни зони)',       system_bg: 'Нервна' },
+  { id: 'R-sinus',          side: 'R',   mins: [2,  6],  rings: [4,  7],  organ_bg: 'Синуси (десни)',             system_bg: 'Дихателна' },
+  { id: 'R-larynx',         side: 'R',   mins: [5,  10], rings: [4,  5],  organ_bg: 'Ларинкс / Гърло',           system_bg: 'Дихателна' },
+  { id: 'R-thyroid',        side: 'R',   mins: [7,  13], rings: [4,  6],  organ_bg: 'Щитовидна жлеза (дясна)',   system_bg: 'Ендокринна' },
+  { id: 'R-eye-ear',        side: 'R',   mins: [10, 17], rings: [4,  7],  organ_bg: 'Ухо / Очи',                 system_bg: 'Нервна' },
+  { id: 'R-bronchi',         side: 'R',   mins: [14, 19], rings: [4,  6],  organ_bg: 'Бронхи (десни)',             system_bg: 'Дихателна' },
+  { id: 'R-shoulder',       side: 'R',   mins: [18, 22], rings: [4,  9],  organ_bg: 'Рамо (дясно)',               system_bg: 'Опорно-двигателна' },
+  { id: 'R-lung',           side: 'R',   mins: [20, 30], rings: [4,  7],  organ_bg: 'Бял дроб (десен)',           system_bg: 'Дихателна' },
+  { id: 'R-liver',          side: 'R',   mins: [23, 35], rings: [4,  9],  organ_bg: 'Черен дроб',                 system_bg: 'Детоксикация' },
+  { id: 'R-bladder',        side: 'R',   mins: [25, 30], rings: [7,  9],  organ_bg: 'Пикочен мехур',             system_bg: 'Отделителна' },
+  { id: 'R-gallbladder',    side: 'R',   mins: [27, 33], rings: [5,  8],  organ_bg: 'Жлъчен мехур',               system_bg: 'Детоксикация' },
+  { id: 'R-urogen',         side: 'R',   mins: [28, 33], rings: [7,  9],  organ_bg: 'Простата / Матка',           system_bg: 'Урогенитална' },
+  { id: 'R-colon-asc',      side: 'R',   mins: [28, 40], rings: [4,  9],  organ_bg: 'Дебело черво (възходящо)',   system_bg: 'Храносмилателна' },
+  { id: 'R-pancreas',       side: 'R',   mins: [35, 42], rings: [4,  7],  organ_bg: 'Панкреас',                   system_bg: 'Храносмилателна' },
+  { id: 'R-kidney',         side: 'R',   mins: [38, 48], rings: [4,  9],  organ_bg: 'Бъбрек (десен)',             system_bg: 'Отделителна' },
+  { id: 'R-adrenal',        side: 'R',   mins: [40, 46], rings: [5,  8],  organ_bg: 'Надбъбречна жлеза (дясна)', system_bg: 'Ендокринна' },
+  { id: 'R-hip',            side: 'R',   mins: [43, 50], rings: [4,  9],  organ_bg: 'Тазобедрена става (дясна)', system_bg: 'Опорно-двигателна' },
+  { id: 'R-spine-thor',     side: 'R',   mins: [4,  10], rings: [8, 10],  organ_bg: 'Гръбначен стълб (гръден)',   system_bg: 'Опорно-двигателна' },
+  { id: 'R-spine-lumb',     side: 'R',   mins: [25, 33], rings: [8, 10],  organ_bg: 'Гръбначен стълб (лумбален)', system_bg: 'Опорно-двигателна' },
   // ── LEFT EYE ──────────────────────────────────────────────────────
-  { id: 'L-brain-motor', side: 'L',   mins: [57, 59], rings: [4,  9],  organ_bg: 'Мозък (моторни зони)',       system_bg: 'Нервна' },
-  { id: 'L-brain-sens',  side: 'L',   mins: [0,  3],  rings: [4,  9],  organ_bg: 'Мозък (сетивни зони)',       system_bg: 'Нервна' },
-  { id: 'L-sinus',       side: 'L',   mins: [54, 59], rings: [4,  7],  organ_bg: 'Синуси (леви)',              system_bg: 'Дихателна' },
-  { id: 'L-eye-ear',     side: 'L',   mins: [43, 50], rings: [4,  7],  organ_bg: 'Ухо / Очи',                 system_bg: 'Нервна' },
-  { id: 'L-shoulder',    side: 'L',   mins: [38, 42], rings: [4,  9],  organ_bg: 'Рамо (ляво)',                system_bg: 'Опорно-двигателна' },
-  { id: 'L-lung',        side: 'L',   mins: [20, 30], rings: [4,  7],  organ_bg: 'Бял дроб (ляв)',             system_bg: 'Дихателна' },
-  { id: 'L-heart',       side: 'L',   mins: [23, 35], rings: [4,  8],  organ_bg: 'Сърце',                      system_bg: 'Сърдечно-съдова' },
-  { id: 'L-spleen',      side: 'L',   mins: [28, 35], rings: [5,  9],  organ_bg: 'Далак',                      system_bg: 'Имунна' },
-  { id: 'L-colon-desc',  side: 'L',   mins: [28, 40], rings: [4,  9],  organ_bg: 'Дебело черво (низходящо)',   system_bg: 'Храносмилателна' },
-  { id: 'L-kidney',      side: 'L',   mins: [12, 22], rings: [4,  9],  organ_bg: 'Бъбрек (ляв)',               system_bg: 'Отделителна' },
-  { id: 'L-adrenal',     side: 'L',   mins: [14, 20], rings: [5,  8],  organ_bg: 'Надбъбречна жлеза (лява)',  system_bg: 'Ендокринна' },
-  { id: 'L-hip',         side: 'L',   mins: [10, 17], rings: [4,  9],  organ_bg: 'Тазобедрена става (лява)',  system_bg: 'Опорно-двигателна' },
+  { id: 'L-brain-motor',    side: 'L',   mins: [57, 59], rings: [4,  9],  organ_bg: 'Мозък (моторни зони)',       system_bg: 'Нервна' },
+  { id: 'L-brain-sens',     side: 'L',   mins: [0,  3],  rings: [4,  9],  organ_bg: 'Мозък (сетивни зони)',       system_bg: 'Нервна' },
+  { id: 'L-sinus',          side: 'L',   mins: [54, 59], rings: [4,  7],  organ_bg: 'Синуси (леви)',              system_bg: 'Дихателна' },
+  { id: 'L-larynx',         side: 'L',   mins: [50, 55], rings: [4,  5],  organ_bg: 'Ларинкс / Гърло',           system_bg: 'Дихателна' },
+  { id: 'L-thyroid',        side: 'L',   mins: [47, 53], rings: [4,  6],  organ_bg: 'Щитовидна жлеза (лява)',    system_bg: 'Ендокринна' },
+  { id: 'L-eye-ear',        side: 'L',   mins: [43, 50], rings: [4,  7],  organ_bg: 'Ухо / Очи',                 system_bg: 'Нервна' },
+  { id: 'L-bronchi',         side: 'L',   mins: [41, 46], rings: [4,  6],  organ_bg: 'Бронхи (леви)',             system_bg: 'Дихателна' },
+  { id: 'L-shoulder',       side: 'L',   mins: [38, 42], rings: [4,  9],  organ_bg: 'Рамо (ляво)',                system_bg: 'Опорно-двигателна' },
+  { id: 'L-lung',           side: 'L',   mins: [20, 30], rings: [4,  7],  organ_bg: 'Бял дроб (ляв)',             system_bg: 'Дихателна' },
+  { id: 'L-heart',          side: 'L',   mins: [23, 35], rings: [4,  8],  organ_bg: 'Сърце',                      system_bg: 'Сърдечно-съдова' },
+  { id: 'L-bladder',        side: 'L',   mins: [30, 35], rings: [7,  9],  organ_bg: 'Пикочен мехур',             system_bg: 'Отделителна' },
+  { id: 'L-spleen',         side: 'L',   mins: [28, 35], rings: [5,  9],  organ_bg: 'Далак',                      system_bg: 'Имунна' },
+  { id: 'L-urogen',         side: 'L',   mins: [27, 32], rings: [7,  9],  organ_bg: 'Простата / Матка',           system_bg: 'Урогенитална' },
+  { id: 'L-colon-desc',     side: 'L',   mins: [28, 40], rings: [4,  9],  organ_bg: 'Дебело черво (низходящо)',   system_bg: 'Храносмилателна' },
+  { id: 'L-pancreas',       side: 'L',   mins: [18, 25], rings: [4,  7],  organ_bg: 'Панкреас',                   system_bg: 'Храносмилателна' },
+  { id: 'L-kidney',         side: 'L',   mins: [12, 22], rings: [4,  9],  organ_bg: 'Бъбрек (ляв)',               system_bg: 'Отделителна' },
+  { id: 'L-adrenal',        side: 'L',   mins: [14, 20], rings: [5,  8],  organ_bg: 'Надбъбречна жлеза (лява)',  system_bg: 'Ендокринна' },
+  { id: 'L-hip',            side: 'L',   mins: [10, 17], rings: [4,  9],  organ_bg: 'Тазобедрена става (лява)',  system_bg: 'Опорно-двигателна' },
+  { id: 'L-spine-thor',     side: 'L',   mins: [50, 56], rings: [8, 10],  organ_bg: 'Гръбначен стълб (гръден)',   system_bg: 'Опорно-двигателна' },
+  { id: 'L-spine-lumb',     side: 'L',   mins: [27, 35], rings: [8, 10],  organ_bg: 'Гръбначен стълб (лумбален)', system_bg: 'Опорно-двигателна' },
 ];
 
 function promptStep3(side, step1, step2c) {
@@ -1010,9 +1209,17 @@ beyond what is in MAPPED.zoneSummary.
 BUILD LOGIC:
 1) Base constitution/disposition/diathesis from CLEAN.global_clean.
 2) ANW_status from CLEAN.collarette_clean.ANW_status.
-3) Elimination channel priority: gut_ANW → kidney_6 → lymph → skin_scu.
-4) Axes: stress (from nerve/brain zones), digestive (ANW + gut zones), immune (LYM + SCU zones).
-5) Hypotheses: each must cite at least one fid from MAPPED.mappedFindings + its zoneId.
+3) ANW CONTOUR DETAIL: If CLEAN.collarette_clean.segments exists and is non-empty:
+   - Use per-segment data to assess gut_ANW channel more precisely.
+   - Expanded segments near organ zones → flag those organs for digestive involvement.
+   - Contracted segments → may indicate spastic tendency in corresponding sector.
+   - Broken/notched segments → flag as potential weak points in autonomic regulation.
+   - Use contourSummary.expandedSegments / contractedSegments / brokenSegments.
+   - Factor contourSummary.overallIntegrity into digestive axis score.
+4) Elimination channel priority: gut_ANW → kidney_6 → lymph → skin_scu.
+5) Axes: stress (from nerve/brain zones), digestive (ANW + gut zones), immune (LYM + SCU zones).
+6) Hypotheses: each must cite at least one fid from MAPPED.mappedFindings + its zoneId.
+   ANW contour defects can also serve as evidence (cite segment number).
 
 OUTPUT_JSON ONLY:
 {
@@ -1022,7 +1229,14 @@ OUTPUT_JSON ONLY:
     "constitution": "LYM|HEM|BIL|unclear",
     "disposition": "SILK|LINEN|BURLAP|unclear",
     "diathesis": ["HAC", "LRS", "LIP", "DYS"],
-    "ANW_status": "expanded|contracted|broken|normal|unclear"
+    "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
+  },
+  "ANW_profile": {
+    "overallIntegrity": "good|moderate|poor",
+    "expandedSectors": "list of clock positions where ANW is expanded",
+    "contractedSectors": "list of clock positions where ANW is contracted",
+    "brokenSectors": "list of clock positions where ANW has breaks",
+    "clinicalNote": "<=120 chars: brief interpretation of ANW contour pattern"
   },
   "axesScore": { "stress0_100": 0, "digestive0_100": 0, "immune0_100": 0 },
   "elimChannels": [
@@ -1121,12 +1335,22 @@ HOW TO FILL EACH ZONE:
 
 ARTIFACTS (2–5 strongest from CLEAN + MAPPED):
   Types to prioritize: lacuna, crypt, radial_furrow, deep_radial_cleft, nerve_rings,
-                       pigment_spot, sodium_ring, scurf_rim, lymphatic_rosary
+                       pigment_spot, sodium_ring, scurf_rim, lymphatic_rosary,
+                       ANW contour defects (break, notch, ballooning)
   location format: clock string using 5-min = 1-hour mapping:
     minute 0→"12:00", 5→"1:00", 10→"2:00", 15→"3:00", 20→"4:00", 25→"5:00",
     30→"6:00", 35→"7:00", 40→"8:00", 45→"9:00", 50→"10:00", 55→"11:00"
     Example: minuteRange [15,20] → "3:00-4:00"
   description: brief Bulgarian ≤ 60 chars, correlated with questionnaire if possible
+
+COLLARETTE PROFILE (from CLEAN.collarette_clean + PROFILE.ANW_profile):
+  If CLEAN.collarette_clean.segments is available and non-empty, build collaretteProfile:
+  - status: CLEAN.collarette_clean.ANW_status (Bulgarian label)
+  - integrity: PROFILE.ANW_profile.overallIntegrity or CLEAN.collarette_clean.contourSummary.overallIntegrity
+  - For each of the 12 segments: report shape and position in Bulgarian
+  - defects: list notable ANW defects (breaks, notches, ballooning) with clock location
+  - clinicalNote: brief Bulgarian interpretation ≤ 120 chars
+  If segments data is not available, output collaretteProfile with just status and a note.
 
 SYSTEM SCORES (always output exactly 6):
   Храносмилателна | Имунна | Нервна | Сърдечно-съдова | Детоксикация | Ендокринна
@@ -1158,6 +1382,17 @@ OUTPUT_JSON ONLY:
     "artifacts": [
       {"type":"тип_БГ","location":"3:00-4:00","description":"<=60","severity":"low|medium|high"}
     ],
+    "collaretteProfile": {
+      "status": "разширена|свита|прекъсната|нормална|смесена|неясна",
+      "integrity": "добра|умерена|слаба",
+      "segments": [
+        {"seg":1,"clock":"12-1ч","shape":"нормална|разширена|свита|прекъсната|вдлъбната|балониране|заличена","position":"висока|средна|ниска","visible":true}
+      ],
+      "defects": [
+        {"type":"прекъсване|вдлъбнатина|балониране|лезия","location":"3:00-4:00","description":"<=60"}
+      ],
+      "clinicalNote": "<=120 chars кратка интерпретация на контура на колартата"
+    },
     "overallHealth": 75,
     "systemScores": [
       {"system":"Храносмилателна","score":80,"description":"<=60"},

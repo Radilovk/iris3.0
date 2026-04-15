@@ -942,46 +942,72 @@
             const blur = new cv.Mat();
             cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
             
-            const edges = new cv.Mat();
-            cv.Canny(blur, edges, 30, 100);
+            // Search range: 2.2x to 7.5x pupil radius (matching app.py)
+            const minR = Math.round(pr * 2.2);
+            let maxR = Math.round(pr * 7.5);
             
-            // Search for iris edge in radial direction
-            const minR = Math.round(pr * 1.5);
-            const maxR = Math.round(pr * 4);
-            let bestR = Math.round(pr * 2.5); // default
-            let maxEdges = 0;
+            // Clamp to image bounds
+            const maxDist = Math.min(px, py, mat.cols - px, mat.rows - py);
+            if (maxR > maxDist) maxR = maxDist;
+            
+            if (minR >= maxR) {
+                gray.delete();
+                blur.delete();
+                return Math.round(pr * 3.5);
+            }
+            
+            let bestR = minR;
+            let maxGrad = -1;
+            
+            // Gradient-based iris boundary detection (matching app.py approach)
+            const angles = [0, 180, 15, -15, 165, 195];
             
             for (let r = minR; r < maxR; r += 2) {
-                let edgeCount = 0;
-                const numSamples = 72;
-                for (let i = 0; i < numSamples; i++) {
-                    const angle = (i / numSamples) * 2 * Math.PI;
-                    const x = Math.round(px + r * Math.cos(angle));
-                    const y = Math.round(py + r * Math.sin(angle));
-                    if (x >= 0 && x < edges.cols && y >= 0 && y < edges.rows) {
-                        if (edges.ucharPtr(y, x)[0] > 0) edgeCount++;
+                let score = 0;
+                let samples = 0;
+                
+                for (const deg of angles) {
+                    const rad = deg * Math.PI / 180;
+                    const nx = Math.cos(rad);
+                    const ny = Math.sin(rad);
+                    
+                    const xIn = Math.round(px + (r - 3) * nx);
+                    const yIn = Math.round(py + (r - 3) * ny);
+                    const xOut = Math.round(px + (r + 3) * nx);
+                    const yOut = Math.round(py + (r + 3) * ny);
+                    
+                    if (xIn >= 0 && xIn < blur.cols && yIn >= 0 && yIn < blur.rows &&
+                        xOut >= 0 && xOut < blur.cols && yOut >= 0 && yOut < blur.rows) {
+                        const valIn = blur.ucharPtr(yIn, xIn)[0];
+                        const valOut = blur.ucharPtr(yOut, xOut)[0];
+                        score += (valOut - valIn);
+                        samples++;
                     }
                 }
-                if (edgeCount > maxEdges) {
-                    maxEdges = edgeCount;
-                    bestR = r;
+                
+                if (samples > 0) {
+                    const avg = score / samples;
+                    if (avg > maxGrad) {
+                        maxGrad = avg;
+                        bestR = r;
+                    }
                 }
             }
             
             gray.delete();
             blur.delete();
-            edges.delete();
             
+            if (maxGrad < 5) {
+                return Math.round(pr * 4.0);
+            }
             return bestR;
         }
         
         // Unwrap iris to rectangular strip (polar to cartesian)
-        // Mobile-optimized: uses smaller dimensions for better performance
+        // Always uses 1200x300 to match AI pipeline expectations
         function unwrapIris(mat, px, py, pr, ir) {
-            // Detect if mobile device and use smaller output
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            const outputWidth = isMobile ? 800 : 1200;
-            const outputHeight = isMobile ? 200 : 300;
+            const outputWidth = 1200;
+            const outputHeight = 300;
             const result = new cv.Mat(outputHeight, outputWidth, cv.CV_8UC4);
             
             for (let y = 0; y < outputHeight; y++) {
@@ -1007,7 +1033,7 @@
             return result;
         }
         
-        // Draw grid map with labels
+        // Draw grid map with labels (matching app.py draw_ai_grid_map_expanded)
         function drawGridMap(unwrapped, side) {
             const canvasWidth = 1280;
             const canvasHeight = 390;
@@ -1022,21 +1048,23 @@
             canvas.height = canvasHeight;
             const ctx = canvas.getContext('2d');
             
-            // Dark background
-            ctx.fillStyle = '#1a1a1a';
+            // White background (matching app.py canvas)
+            ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, canvasWidth, canvasHeight);
             
-            // Draw unwrapped image
-            cv.imshow(canvas, unwrapped);
-            const imgData = ctx.getImageData(0, 0, imgWidth, imgHeight);
+            // Draw unwrapped image — get pixels from cv.Mat
+            // First render to a temp canvas at unwrapped size
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = unwrapped.cols;
+            tmpCanvas.height = unwrapped.rows;
+            cv.imshow(tmpCanvas, unwrapped);
             
-            // Clear and redraw with padding
-            ctx.fillStyle = '#1a1a1a';
-            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-            ctx.putImageData(imgData, paddingLeft, paddingTop);
+            // Draw the unwrapped image into the padded area, scaling to 1200×300
+            ctx.drawImage(tmpCanvas, 0, 0, unwrapped.cols, unwrapped.rows,
+                          paddingLeft, paddingTop, imgWidth, imgHeight);
             
-            // Draw grid
-            ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+            // Draw grid lines (light gray, matching app.py)
+            ctx.strokeStyle = 'rgb(200, 200, 200)';
             ctx.lineWidth = 1;
             
             // Vertical lines (minutes)
@@ -1046,37 +1074,71 @@
                 ctx.moveTo(x, paddingTop);
                 ctx.lineTo(x, paddingTop + imgHeight);
                 ctx.stroke();
+                
+                // Tick mark above grid
+                ctx.strokeStyle = 'rgb(0, 0, 0)';
+                ctx.beginPath();
+                ctx.moveTo(x, paddingTop - 5);
+                ctx.lineTo(x, paddingTop);
+                ctx.stroke();
+                ctx.strokeStyle = 'rgb(200, 200, 200)';
             }
             
             // Horizontal lines (rings)
+            ctx.strokeStyle = 'rgb(240, 240, 240)';
             for (let r = 0; r <= 12; r++) {
                 const y = paddingTop + (r / 12) * imgHeight;
                 ctx.beginPath();
                 ctx.moveTo(paddingLeft, y);
                 ctx.lineTo(paddingLeft + imgWidth, y);
                 ctx.stroke();
+                
+                // Tick mark to the left
+                if (r < 12) {
+                    ctx.strokeStyle = 'rgb(0, 0, 0)';
+                    ctx.beginPath();
+                    ctx.moveTo(paddingLeft - 5, y);
+                    ctx.lineTo(paddingLeft, y);
+                    ctx.stroke();
+                    ctx.strokeStyle = 'rgb(240, 240, 240)';
+                }
             }
             
-            // Draw labels
-            ctx.fillStyle = '#00ff00';
-            ctx.font = '12px sans-serif';
+            // Draw labels (black text, matching app.py)
+            ctx.fillStyle = '#000000';
+            ctx.font = '10px sans-serif';
             
-            // Minute labels
+            // Minute labels at top
             for (let m = 0; m <= 60; m += 5) {
                 const x = paddingLeft + (m / 60) * imgWidth;
-                ctx.fillText(m.toString(), x - 5, paddingTop - 5);
+                const text = m.toString();
+                const metrics = ctx.measureText(text);
+                ctx.fillText(text, x - metrics.width / 2, paddingTop - 10);
             }
             
-            // Ring labels
+            // Ring labels on left
+            ctx.font = '12px sans-serif';
             for (let r = 0; r < 12; r++) {
                 const y = paddingTop + (r / 12) * imgHeight + 15;
                 ctx.fillText('R' + r, 5, y);
             }
             
-            // Eye label
+            // Eye label (bottom left)
             ctx.font = 'bold 16px sans-serif';
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = '#000000';
             ctx.fillText(side === 'R' ? 'RIGHT EYE' : 'LEFT EYE', paddingLeft, canvasHeight - 10);
+            
+            // NASAL / TEMPORAL labels (matching app.py)
+            const nm = side === 'R' ? 45 : 15;
+            const tm = side === 'R' ? 15 : 45;
+            const nx = paddingLeft + (nm / 60) * imgWidth;
+            const tx = paddingLeft + (tm / 60) * imgWidth;
+            
+            ctx.font = '12px sans-serif';
+            ctx.fillStyle = 'rgb(0, 0, 255)';
+            ctx.fillText('^ NASAL', nx - 30, canvasHeight - 10);
+            ctx.fillStyle = 'rgb(100, 100, 100)';
+            ctx.fillText('^ TEMPORAL', tx - 40, canvasHeight - 10);
             
             // Return as Mat
             const result = cv.imread(canvas);
@@ -1158,6 +1220,13 @@
                 const formData = new FormData();
                 formData.append('strip_image', stripB64);
                 formData.append('side', side);
+                
+                // Generate image hash for caching consistency
+                const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stripB64));
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const imageHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 12);
+                formData.append('image_hash', imageHash);
+                
                 if (questionnaire) {
                     formData.append('questionnaire', JSON.stringify(questionnaire));
                 }
