@@ -53,6 +53,10 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 #   - For OpenAI: Get from https://platform.openai.com/api-keys
 #   - For Gemini: Get from https://aistudio.google.com/app/apikey
 # The secret is available in the worker as env.AI_API_KEY
+#
+# Admin panel secret — protects all /admin/* routes:
+#   wrangler secret put ADMIN_SECRET
+# If not set, admin routes are accessible without auth (only suitable for dev).
 
 # ─── Quick-start instructions ────────────────────────────────────────────────────
 # 1. Install Wrangler:       npm install -g wrangler

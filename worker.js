@@ -65,6 +65,9 @@ export default {
       if (request.method === 'GET' && url.pathname === '/health') {
         return handleHealthCheck(env);
       }
+      if (url.pathname.startsWith('/admin')) {
+        return await handleAdmin(request, env, url);
+      }
       return jsonResp({ error: 'Not Found' }, 404);
     } catch (err) {
       const msg = err?.message || String(err);
@@ -981,6 +984,126 @@ RULES:
 
 FAILSAFE:
 {"error":{"stage":"CALL3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
+}
+
+// =====================================================================
+// ADMIN PANEL ROUTES
+// =====================================================================
+
+function checkAdminAuth(request, env) {
+  if (!env.ADMIN_SECRET) return true; // open if no secret configured
+  const auth = request.headers.get('Authorization') || '';
+  return auth === `Bearer ${env.ADMIN_SECRET}`;
+}
+
+async function handleAdmin(request, env, url) {
+  if (!checkAdminAuth(request, env)) {
+    return jsonResp({ error: 'Unauthorized — provide correct Authorization: Bearer <ADMIN_SECRET>' }, 401);
+  }
+
+  const path = url.pathname;
+  const method = request.method;
+
+  // GET /admin/health — extended worker health + config
+  if (method === 'GET' && path === '/admin/health') {
+    return jsonResp({
+      status: env.AI_API_KEY ? 'healthy' : 'degraded',
+      version: 'v11.0-3call-precision',
+      provider: env.AI_PROVIDER || 'gemini',
+      model: env.AI_MODEL || 'gemini-2.0-flash',
+      apiKeyConfigured: !!env.AI_API_KEY,
+      adminSecretConfigured: !!env.ADMIN_SECRET,
+      kvConfigured: !!env.IRIS_KV,
+      aiBaseUrl: env.AI_BASE_URL || 'https://api.openai.com/v1',
+      geminiApiUrl: env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta',
+      pipelineSteps: 3,
+      pipelineDescription: 'CALL1(vision:detect) → CALL2(vision:verify+map) → CALL3(text:report)',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // GET /admin/cache/list?prefix=&cursor= — list KV keys (paginated, max 100)
+  if (method === 'GET' && path === '/admin/cache/list') {
+    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    const prefix = url.searchParams.get('prefix') || '';
+    const cursor = url.searchParams.get('cursor') || undefined;
+    const limit  = Math.min(Number(url.searchParams.get('limit') || 50), 100);
+    const listOpts = { prefix, limit };
+    if (cursor) listOpts.cursor = cursor;
+    const list = await env.IRIS_KV.list(listOpts).catch(err => ({ error: err?.message }));
+    return jsonResp(list);
+  }
+
+  // GET /admin/cache/entry?key= — read one KV entry
+  if (method === 'GET' && path === '/admin/cache/entry') {
+    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    const key = url.searchParams.get('key');
+    if (!key) return jsonResp({ error: 'key query param required' }, 400);
+    const value = await env.IRIS_KV.get(key, 'json').catch(() => null);
+    if (value === null) return jsonResp({ error: 'Entry not found' }, 404);
+    return jsonResp({ key, value });
+  }
+
+  // DELETE /admin/cache/entry?key= — delete one KV entry
+  if (method === 'DELETE' && path === '/admin/cache/entry') {
+    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    const key = url.searchParams.get('key');
+    if (!key) return jsonResp({ error: 'key query param required' }, 400);
+    await env.IRIS_KV.delete(key).catch(err => { throw err; });
+    return jsonResp({ deleted: true, key });
+  }
+
+  // DELETE /admin/cache/flush — delete all KV entries (iterative)
+  if (method === 'DELETE' && path === '/admin/cache/flush') {
+    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    let cursor;
+    let total = 0;
+    do {
+      const opts = { limit: 100 };
+      if (cursor) opts.cursor = cursor;
+      const list = await env.IRIS_KV.list(opts);
+      const keys = list.keys.map(k => k.name);
+      await Promise.all(keys.map(k => env.IRIS_KV.delete(k)));
+      total += keys.length;
+      cursor = list.list_complete ? undefined : list.cursor;
+    } while (cursor);
+    return jsonResp({ flushed: true, deletedCount: total });
+  }
+
+  // POST /admin/test-ai — test the AI provider with a simple text prompt
+  if (method === 'POST' && path === '/admin/test-ai') {
+    const body = await request.json().catch(() => ({}));
+    const aiProvider = body.ai_provider || null;
+    const aiModel    = body.ai_model || null;
+    const prompt     = body.prompt || 'Reply with exactly: {"status":"ok","message":"AI is working"}';
+    const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel);
+    const t0 = Date.now();
+    try {
+      const raw = await aiCall(effectiveEnv, prompt, null);
+      return jsonResp({
+        ok: true,
+        provider: effectiveEnv.AI_PROVIDER,
+        model: effectiveEnv.AI_MODEL,
+        durationMs: Date.now() - t0,
+        response: raw,
+      });
+    } catch (err) {
+      return jsonResp({
+        ok: false,
+        provider: effectiveEnv.AI_PROVIDER,
+        model: effectiveEnv.AI_MODEL,
+        durationMs: Date.now() - t0,
+        error: err?.message || String(err),
+      }, 502);
+    }
+  }
+
+  // GET /admin/models — list all available models (same as public /models)
+  if (method === 'GET' && path === '/admin/models') {
+    return handleGetModels(env);
+  }
+
+  return jsonResp({ error: 'Admin route not found', path }, 404);
 }
 
 // =====================================================================
