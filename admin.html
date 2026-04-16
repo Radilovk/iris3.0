@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Iris 3.0 — Админ Панел</title>
+  <style>
+    :root {
+      --bg-dark: #0f0f0f;
+      --bg-card: #1a1a1a;
+      --bg-control: #242424;
+      --bg-hover: #2d2d2d;
+      --accent: #007bff;
+      --accent-hover: #0056b3;
+      --success: #28a745;
+      --warning: #ffc107;
+      --danger: #dc3545;
+      --danger-hover: #a71d2a;
+      --text: #e0e0e0;
+      --text-muted: #888;
+      --border: #333;
+      --border-light: #444;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-dark);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace, sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── Login Overlay ── */
+    #loginOverlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.92);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    #loginOverlay.hidden { display: none; }
+
+    .login-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 14px;
+      padding: 36px 40px;
+      width: min(420px, 95vw);
+      text-align: center;
+    }
+    .login-box h2 { font-size: 1.4rem; margin-bottom: 8px; color: #fff; }
+    .login-box p  { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 24px; }
+
+    .login-field { margin-bottom: 14px; text-align: left; }
+    .login-field label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 5px; }
+    .login-field input {
+      width: 100%; padding: 10px 12px;
+      background: var(--bg-control); border: 1px solid var(--border-light);
+      border-radius: 7px; color: var(--text); font-size: 0.9rem;
+    }
+    .login-field input:focus { outline: none; border-color: var(--accent); }
+
+    .login-error { color: var(--danger); font-size: 0.82rem; margin-bottom: 12px; min-height: 18px; }
+
+    /* ── Top Bar ── */
+    .topbar {
+      display: flex; align-items: center; gap: 16px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      position: sticky; top: 0; z-index: 100;
+    }
+    .topbar-title { font-weight: 700; font-size: 1rem; color: #fff; flex: 1; }
+    .topbar-url   { font-size: 0.78rem; color: var(--text-muted); font-family: monospace; }
+    .topbar-status {
+      font-size: 0.75rem; padding: 3px 10px; border-radius: 20px;
+      font-weight: 600; letter-spacing: 0.03em;
+    }
+    .topbar-status.healthy  { background: rgba(40,167,69,.2);  color: var(--success); }
+    .topbar-status.degraded { background: rgba(220,53,69,.2);  color: var(--danger); }
+    .topbar-status.unknown  { background: rgba(136,136,136,.2); color: var(--text-muted); }
+
+    /* ── Layout ── */
+    .layout { display: flex; min-height: calc(100vh - 53px); }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 200px; flex-shrink: 0;
+      background: var(--bg-card);
+      border-right: 1px solid var(--border);
+      padding: 20px 0;
+    }
+    .sidebar-nav { list-style: none; }
+    .sidebar-nav li a {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 20px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.88rem;
+      transition: background 0.15s, color 0.15s;
+      cursor: pointer;
+    }
+    .sidebar-nav li a:hover { background: var(--bg-hover); color: var(--text); }
+    .sidebar-nav li a.active { background: rgba(0,123,255,.12); color: var(--accent); border-right: 2px solid var(--accent); }
+    .sidebar-nav li a .icon { font-size: 1.1rem; width: 22px; text-align: center; }
+
+    .sidebar-footer {
+      position: absolute; bottom: 0; width: 200px;
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+    }
+    .sidebar-footer button {
+      width: 100%; padding: 8px; border-radius: 6px;
+      background: transparent; border: 1px solid var(--border-light);
+      color: var(--text-muted); cursor: pointer; font-size: 0.8rem;
+    }
+    .sidebar-footer button:hover { border-color: var(--danger); color: var(--danger); }
+
+    /* ── Main Content ── */
+    .main {
+      flex: 1; padding: 24px 28px;
+      overflow-y: auto;
+      max-width: 960px;
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    h2.section-title { font-size: 1.2rem; color: #fff; margin-bottom: 18px; }
+    h3.sub-title     { font-size: 0.95rem; color: var(--text); margin-bottom: 12px; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+      margin-bottom: 18px;
+    }
+
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .card-header h3 { font-size: 0.95rem; color: #ddd; }
+
+    /* ── Grid ── */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    @media (max-width: 700px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .sidebar { width: 56px; }
+      .sidebar-nav li a span.label { display: none; }
+    }
+
+    /* ── Stat tiles ── */
+    .stat-tile {
+      background: var(--bg-control);
+      border-radius: 8px; padding: 14px 16px;
+      text-align: center;
+    }
+    .stat-tile .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+    .stat-tile .lbl { font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; }
+
+    /* ── Health items ── */
+    .health-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+    }
+    .health-item:last-child { border-bottom: none; }
+    .health-item .key { flex: 0 0 170px; color: var(--text-muted); font-family: monospace; }
+    .health-item .val { font-weight: 600; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .dot.green  { background: var(--success); box-shadow: 0 0 5px var(--success); }
+    .dot.red    { background: var(--danger);  box-shadow: 0 0 5px var(--danger); }
+    .dot.yellow { background: var(--warning); box-shadow: 0 0 5px var(--warning); }
+
+    /* ── Buttons ── */
+    .btn {
+      padding: 8px 16px; border: none; border-radius: 7px;
+      cursor: pointer; font-size: 0.85rem; font-weight: 600;
+      transition: filter 0.15s, opacity 0.15s;
+    }
+    .btn:hover { filter: brightness(1.12); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+    .btn-primary  { background: var(--accent);   color: #fff; }
+    .btn-danger   { background: var(--danger);   color: #fff; }
+    .btn-warning  { background: var(--warning);  color: #000; }
+    .btn-ghost    { background: var(--bg-control); color: var(--text); border: 1px solid var(--border-light); }
+    .btn-sm       { padding: 4px 10px; font-size: 0.78rem; border-radius: 5px; }
+    .btn-icon     { padding: 5px 8px; border-radius: 5px; background: var(--bg-control); border: 1px solid var(--border); color: var(--text); cursor: pointer; font-size: 0.8rem; }
+    .btn-icon:hover { background: var(--bg-hover); }
+
+    /* ── Form controls ── */
+    .field-group { margin-bottom: 14px; }
+    .field-group label { display: block; font-size: 0.78rem; color: var(--text-muted); margin-bottom: 5px; }
+    .field-group input, .field-group select, .field-group textarea {
+      width: 100%; padding: 9px 12px;
+      background: var(--bg-control); border: 1px solid var(--border-light);
+      border-radius: 7px; color: var(--text); font-size: 0.88rem;
+      font-family: inherit;
+    }
+    .field-group textarea { min-height: 90px; resize: vertical; font-family: monospace; }
+    .field-group input:focus, .field-group select:focus, .field-group textarea:focus {
+      outline: none; border-color: var(--accent);
+    }
+
+    /* ── Cache Table ── */
+    .cache-toolbar {
+      display: flex; gap: 10px; align-items: center;
+      margin-bottom: 14px; flex-wrap: wrap;
+    }
+    .cache-search {
+      flex: 1; min-width: 180px;
+      padding: 8px 12px;
+      background: var(--bg-control); border: 1px solid var(--border-light);
+      border-radius: 7px; color: var(--text); font-size: 0.85rem;
+    }
+    .cache-search:focus { outline: none; border-color: var(--accent); }
+
+    .cache-table-wrap { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse; font-size: 0.82rem;
+    }
+    thead th {
+      text-align: left; padding: 9px 12px;
+      background: var(--bg-control); color: var(--text-muted);
+      font-weight: 600; border-bottom: 1px solid var(--border);
+      user-select: none;
+    }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
+    tbody tr:hover { background: var(--bg-hover); }
+    tbody td { padding: 8px 12px; font-family: monospace; font-size: 0.78rem; }
+    .td-key { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #7eb8ff; }
+    .td-actions { white-space: nowrap; display: flex; gap: 6px; }
+
+    /* ── Pagination ── */
+    .pagination { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+
+    /* ── JSON Viewer ── */
+    .json-viewer {
+      background: #0d1117; border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px;
+      font-family: 'Courier New', monospace; font-size: 0.78rem;
+      white-space: pre-wrap; word-break: break-all;
+      max-height: 480px; overflow-y: auto; color: #adbac7;
+      line-height: 1.5;
+    }
+    .json-viewer .jk  { color: #79c0ff; }  /* key */
+    .json-viewer .jv  { color: #a5d6ff; }  /* string val */
+    .json-viewer .jn  { color: #ff9f43; }  /* number */
+    .json-viewer .jb  { color: #56d364; }  /* bool */
+    .json-viewer .jnl { color: #8b949e; }  /* null */
+
+    /* ── AI Test ── */
+    .response-meta {
+      display: flex; gap: 14px; margin-bottom: 10px;
+      font-size: 0.78rem; color: var(--text-muted);
+    }
+    .response-meta span { padding: 2px 8px; border-radius: 4px; background: var(--bg-control); }
+
+    /* ── Pipeline result ── */
+    .pipeline-status {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; border-radius: 8px;
+      font-size: 0.88rem; margin-bottom: 14px;
+    }
+    .pipeline-status.ok   { background: rgba(40,167,69,.12); border: 1px solid rgba(40,167,69,.3); }
+    .pipeline-status.err  { background: rgba(220,53,69,.12); border: 1px solid rgba(220,53,69,.3); }
+    .pipeline-status.idle { background: var(--bg-control); }
+
+    /* ── Badge ── */
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 12px;
+      font-size: 0.72rem; font-weight: 600;
+    }
+    .badge-green  { background: rgba(40,167,69,.2);  color: var(--success); }
+    .badge-red    { background: rgba(220,53,69,.2);  color: var(--danger); }
+    .badge-blue   { background: rgba(0,123,255,.2);  color: #7eb8ff; }
+    .badge-yellow { background: rgba(255,193,7,.2);  color: var(--warning); }
+
+    /* ── Spinner ── */
+    .spinner {
+      display: inline-block; width: 16px; height: 16px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Modal ── */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 500;
+    }
+    .modal-backdrop.hidden { display: none; }
+    .modal {
+      background: var(--bg-card); border: 1px solid var(--border-light);
+      border-radius: 12px; width: min(760px, 96vw);
+      max-height: 90vh; display: flex; flex-direction: column;
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px; border-bottom: 1px solid var(--border);
+    }
+    .modal-header h3 { font-size: 0.92rem; color: #ddd; }
+    .modal-close { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1.2rem; }
+    .modal-body { padding: 16px 18px; overflow-y: auto; flex: 1; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed; bottom: 24px; right: 24px;
+      padding: 10px 18px; border-radius: 8px;
+      font-size: 0.85rem; font-weight: 600;
+      transition: opacity 0.3s; z-index: 9990;
+      pointer-events: none;
+    }
+    #toast.show-success { background: rgba(40,167,69,.9); color: #fff; opacity: 1; }
+    #toast.show-error   { background: rgba(220,53,69,.9); color: #fff; opacity: 1; }
+    #toast.hidden       { opacity: 0; }
+
+    /* ── Divider ── */
+    .divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+
+    /* ── Models grid ── */
+    .model-chip {
+      background: var(--bg-control); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 10px;
+      font-size: 0.76rem; font-family: monospace; color: #7eb8ff;
+      cursor: pointer;
+    }
+    .model-chip:hover { background: rgba(0,123,255,.15); border-color: var(--accent); }
+
+    .flex-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .flex-1   { flex: 1; }
+  </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════
+     LOGIN OVERLAY
+════════════════════════════════════════ -->
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>🔐 Iris Admin</h2>
+    <p>Въведете адреса на Worker и Admin Secret за достъп до панела</p>
+
+    <div class="login-field">
+      <label>Worker URL</label>
+      <input id="loginUrl" type="url" placeholder="https://iris.radilov-k.workers.dev" value="https://iris.radilov-k.workers.dev">
+    </div>
+    <div class="login-field">
+      <label>Admin Secret (оставете празно ако не е зададен)</label>
+      <input id="loginSecret" type="password" placeholder="ADMIN_SECRET">
+    </div>
+    <div class="login-error" id="loginError"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Влез в панела →</button>
+    <p style="margin-top:14px; font-size:0.72rem; color:var(--text-muted)">
+      Настройте <code>ADMIN_SECRET</code> в Cloudflare Dashboard → Worker → Settings → Secrets
+    </p>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════
+     TOP BAR
+════════════════════════════════════════ -->
+<div class="topbar">
+  <div class="topbar-title">🔮 Iris 3.0 — Админ Панел</div>
+  <div class="topbar-url" id="topbarUrl">—</div>
+  <span class="topbar-status unknown" id="topbarStatus">—</span>
+  <button class="btn btn-ghost btn-sm" onclick="refreshDashboard()" title="Обнови">⟳ Refresh</button>
+</div>
+
+<!-- ════════════════════════════════════════
+     MAIN LAYOUT
+════════════════════════════════════════ -->
+<div class="layout">
+
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <ul class="sidebar-nav">
+      <li><a class="active" onclick="switchTab('dashboard')" id="nav-dashboard">
+        <span class="icon">🏠</span><span class="label"> Дашборд</span>
+      </a></li>
+      <li><a onclick="switchTab('cache')" id="nav-cache">
+        <span class="icon">💾</span><span class="label"> Кеш</span>
+      </a></li>
+      <li><a onclick="switchTab('ai-test')" id="nav-ai-test">
+        <span class="icon">🤖</span><span class="label"> Тест AI</span>
+      </a></li>
+      <li><a onclick="switchTab('pipeline')" id="nav-pipeline">
+        <span class="icon">🔬</span><span class="label"> Пайплайн</span>
+      </a></li>
+      <li><a onclick="switchTab('models')" id="nav-models">
+        <span class="icon">📋</span><span class="label"> Модели</span>
+      </a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <button onclick="logout()">🚪 Изход</button>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- ═══ DASHBOARD ═══ -->
+    <div class="tab-panel active" id="tab-dashboard">
+      <h2 class="section-title">🏠 Дашборд</h2>
+
+      <div class="grid-3" style="margin-bottom:18px">
+        <div class="stat-tile">
+          <div class="val" id="stat-status">—</div>
+          <div class="lbl">Worker Status</div>
+        </div>
+        <div class="stat-tile">
+          <div class="val" id="stat-provider">—</div>
+          <div class="lbl">AI Provider</div>
+        </div>
+        <div class="stat-tile">
+          <div class="val" id="stat-model" style="font-size:1rem">—</div>
+          <div class="lbl">AI Model</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>⚙️ Конфигурация на Worker</h3>
+          <button class="btn btn-ghost btn-sm" onclick="refreshDashboard()">⟳ Refresh</button>
+        </div>
+        <div id="healthDetails">
+          <div style="color:var(--text-muted);font-size:0.85rem">Зареждане...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>📊 Бърз преглед на кеша</h3>
+          <button class="btn btn-ghost btn-sm" onclick="quickCachePreview()">⟳ Refresh</button>
+        </div>
+        <div id="quickCacheInfo">
+          <div style="color:var(--text-muted);font-size:0.85rem">Зареждане...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ CACHE ═══ -->
+    <div class="tab-panel" id="tab-cache">
+      <h2 class="section-title">💾 Кеш Мениджър</h2>
+
+      <div class="cache-toolbar">
+        <input class="cache-search" id="cacheSearch" placeholder="Филтрирай по ключ (prefix)…" oninput="debouncedCacheLoad()">
+        <button class="btn btn-ghost btn-sm" onclick="loadCacheList()">⟳ Обнови</button>
+        <button class="btn btn-danger btn-sm" onclick="confirmFlush()">🗑 Изчисти всичко</button>
+      </div>
+
+      <div class="cache-table-wrap">
+        <table id="cacheTable">
+          <thead>
+            <tr>
+              <th>Ключ</th>
+              <th>Изтича</th>
+              <th style="width:100px">Действия</th>
+            </tr>
+          </thead>
+          <tbody id="cacheTableBody">
+            <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:20px">Зареждане...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination" id="cachePagination"></div>
+
+      <div style="margin-top:10px; font-size:0.78rem; color:var(--text-muted)" id="cacheCount"></div>
+    </div>
+
+    <!-- ═══ AI TEST ═══ -->
+    <div class="tab-panel" id="tab-ai-test">
+      <h2 class="section-title">🤖 Тест на AI</h2>
+
+      <div class="card">
+        <div class="grid-2">
+          <div class="field-group">
+            <label>AI Provider (оставете за default)</label>
+            <select id="testProvider" onchange="updateTestModels()">
+              <option value="">-- Default (от Worker) --</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="openai">OpenAI</option>
+              <option value="openai-compatible">OpenAI-съвместим</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>AI Model (оставете за default)</label>
+            <select id="testModel">
+              <option value="">-- Default (от Worker) --</option>
+            </select>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Тестов Prompt</label>
+          <textarea id="testPrompt" rows="5">Reply with exactly this JSON (no markdown):
+{"status": "ok", "message": "AI pipeline is working", "timestamp": "<current ISO timestamp>"}</textarea>
+        </div>
+        <button class="btn btn-primary" id="testAiBtn" onclick="runAiTest()">
+          ▶ Изпрати към AI
+        </button>
+      </div>
+
+      <div class="card" id="aiTestResult" style="display:none">
+        <div class="card-header">
+          <h3>Резултат</h3>
+          <div class="response-meta" id="aiTestMeta"></div>
+        </div>
+        <div class="json-viewer" id="aiTestOutput"></div>
+      </div>
+    </div>
+
+    <!-- ═══ PIPELINE TEST ═══ -->
+    <div class="tab-panel" id="tab-pipeline">
+      <h2 class="section-title">🔬 Тест на Пайплайн</h2>
+
+      <div class="card">
+        <div class="grid-2" style="margin-bottom:14px">
+          <div class="field-group">
+            <label>Изображение на ириса</label>
+            <input type="file" id="pipelineFile" accept="image/*" onchange="onPipelineFileChange()">
+          </div>
+          <div class="field-group">
+            <label>Страна (Side)</label>
+            <select id="pipelineSide">
+              <option value="R">Дясно (R)</option>
+              <option value="L">Ляво (L)</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="pipelinePreview" style="display:none; margin-bottom:14px">
+          <img id="pipelineImg" style="max-width:100%;border-radius:8px;border:1px solid var(--border)">
+        </div>
+
+        <div class="grid-2">
+          <div class="field-group">
+            <label>AI Provider (оставете за default)</label>
+            <select id="pipelineProvider" onchange="updatePipelineModels()">
+              <option value="">-- Default (от Worker) --</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>AI Model (оставете за default)</label>
+            <select id="pipelineModel">
+              <option value="">-- Default (от Worker) --</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>Анкета (JSON, по избор)</label>
+          <textarea id="pipelineQuestionnaire" rows="3" placeholder='{"age":35,"gender":"female","complaints":"headaches, fatigue"}'></textarea>
+        </div>
+
+        <button class="btn btn-primary" id="pipelineBtn" onclick="runPipeline()" disabled>
+          ▶ Стартирай анализ
+        </button>
+      </div>
+
+      <div id="pipelineResult" style="display:none">
+        <div class="pipeline-status idle" id="pipelineStatusBar">
+          Чака изображение…
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3>Суров JSON резултат</h3>
+            <button class="btn btn-ghost btn-sm" onclick="copyResult()">📋 Копирай</button>
+          </div>
+          <div class="json-viewer" id="pipelineOutput"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ MODELS ═══ -->
+    <div class="tab-panel" id="tab-models">
+      <h2 class="section-title">📋 Налични AI Модели</h2>
+      <div class="card" id="modelsCard">
+        <div style="color:var(--text-muted);font-size:0.85rem">Зареждане...</div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ════════════════════════════════════════
+     ENTRY VIEW MODAL
+════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="entryModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="entryModalTitle">Cache Entry</h3>
+      <button class="modal-close" onclick="closeEntryModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="json-viewer" id="entryModalBody" style="max-height:60vh"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="hidden"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════
+let WORKER_URL = '';
+let ADMIN_SECRET = '';
+let cacheNextCursor = null;
+let cacheCurrentPrefix = '';
+let cacheDebounceTimer = null;
+let lastPipelineResult = null;
+
+const GEMINI_MODELS = [
+  'gemini-2.5-flash-preview-04-17', 'gemini-2.5-flash-latest',
+  'gemini-2.0-flash', 'gemini-2.0-flash-lite',
+  'gemini-1.5-pro-latest', 'gemini-1.5-flash-latest',
+];
+const OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'];
+
+// ═══════════════════════════════════════════════════════════
+// AUTH
+// ═══════════════════════════════════════════════════════════
+function doLogin() {
+  const url    = document.getElementById('loginUrl').value.trim().replace(/\/+$/, '');
+  const secret = document.getElementById('loginSecret').value.trim();
+  if (!url) { document.getElementById('loginError').textContent = 'Въведете Worker URL'; return; }
+  WORKER_URL    = url;
+  ADMIN_SECRET  = secret;
+  sessionStorage.setItem('adminUrl',    url);
+  sessionStorage.setItem('adminSecret', secret);
+  document.getElementById('loginOverlay').classList.add('hidden');
+  document.getElementById('topbarUrl').textContent = url;
+  init();
+}
+
+function logout() {
+  sessionStorage.clear();
+  WORKER_URL = ''; ADMIN_SECRET = '';
+  document.getElementById('loginOverlay').classList.remove('hidden');
+  document.getElementById('loginError').textContent = '';
+  document.getElementById('topbarStatus').className = 'topbar-status unknown';
+  document.getElementById('topbarStatus').textContent = '—';
+}
+
+function adminHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  if (ADMIN_SECRET) h['Authorization'] = `Bearer ${ADMIN_SECRET}`;
+  return h;
+}
+
+async function adminFetch(path, opts = {}) {
+  opts.headers = { ...adminHeaders(), ...(opts.headers || {}) };
+  const res = await fetch(WORKER_URL + path, opts);
+  return res;
+}
+
+// ═══════════════════════════════════════════════════════════
+// INIT / ROUTING
+// ═══════════════════════════════════════════════════════════
+function init() {
+  refreshDashboard();
+  loadCacheList();
+  loadModels();
+}
+
+function switchTab(id) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar-nav li a').forEach(a => a.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  document.getElementById('nav-' + id).classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════
+async function refreshDashboard() {
+  try {
+    const res  = await adminFetch('/admin/health');
+    const data = await res.json();
+    renderHealth(data, res.status);
+    quickCachePreview();
+  } catch (e) {
+    document.getElementById('healthDetails').innerHTML =
+      `<div style="color:var(--danger);font-size:0.85rem">Грешка: ${e.message}</div>`;
+  }
+}
+
+function renderHealth(data, status) {
+  if (status === 401) {
+    toast('Грешен Admin Secret — провери и влез отново', 'error');
+    logout(); return;
+  }
+
+  const isHealthy = data.status === 'healthy';
+  document.getElementById('stat-status').textContent   = data.status || '?';
+  document.getElementById('stat-status').style.color   = isHealthy ? 'var(--success)' : 'var(--danger)';
+  document.getElementById('stat-provider').textContent = data.provider || '?';
+  document.getElementById('stat-model').textContent    = data.model || '?';
+
+  const bar = document.getElementById('topbarStatus');
+  bar.className = 'topbar-status ' + (isHealthy ? 'healthy' : 'degraded');
+  bar.textContent = isHealthy ? '✓ Healthy' : '⚠ Degraded';
+
+  const items = [
+    { k: 'version',              v: data.version || '?',               dot: null },
+    { k: 'status',               v: data.status,                        dot: isHealthy ? 'green' : 'red' },
+    { k: 'provider',             v: data.provider || '?',               dot: null },
+    { k: 'model',                v: data.model || '?',                  dot: null },
+    { k: 'apiKeyConfigured',     v: data.apiKeyConfigured ? 'YES' : 'NO', dot: data.apiKeyConfigured ? 'green' : 'red' },
+    { k: 'kvConfigured',         v: data.kvConfigured ? 'YES' : 'NO',    dot: data.kvConfigured ? 'green' : 'yellow' },
+    { k: 'adminSecretConfigured',v: data.adminSecretConfigured ? 'YES' : 'NO (open)', dot: data.adminSecretConfigured ? 'green' : 'yellow' },
+    { k: 'pipelineSteps',        v: data.pipelineSteps ?? '?',          dot: null },
+    { k: 'pipelineDescription',  v: data.pipelineDescription || '?',    dot: null },
+    { k: 'aiBaseUrl',            v: data.aiBaseUrl || '?',              dot: null },
+    { k: 'geminiApiUrl',         v: data.geminiApiUrl || '?',           dot: null },
+    { k: 'timestamp',            v: data.timestamp || '?',              dot: null },
+  ];
+
+  document.getElementById('healthDetails').innerHTML = items.map(it => `
+    <div class="health-item">
+      <span class="key">${it.k}</span>
+      ${it.dot ? `<span class="dot ${it.dot}"></span>` : '<span style="width:10px;display:inline-block"></span>'}
+      <span class="val">${escHtml(String(it.v))}</span>
+    </div>`).join('');
+}
+
+async function quickCachePreview() {
+  try {
+    const res  = await adminFetch('/admin/cache/list?limit=5');
+    const data = await res.json();
+    if (data.error) { document.getElementById('quickCacheInfo').innerHTML = `<div style="color:var(--text-muted);font-size:0.82rem">${data.error}</div>`; return; }
+    const count = data.keys?.length ?? 0;
+    document.getElementById('quickCacheInfo').innerHTML = `
+      <div class="health-item"><span class="key">Записи (max 5 показани)</span><span class="val">${count}</span></div>
+      <div class="health-item"><span class="key">list_complete</span><span class="val">${data.list_complete}</span></div>
+      ${data.keys?.slice(0,5).map(k =>
+        `<div class="health-item"><span class="key" style="max-width:100%;font-size:0.75rem;overflow:hidden;text-overflow:ellipsis">${escHtml(k.name)}</span></div>`
+      ).join('')}
+      <div style="margin-top:10px">
+        <button class="btn btn-ghost btn-sm" onclick="switchTab('cache')">→ Към Кеш Мениджър</button>
+      </div>`;
+  } catch (e) {
+    document.getElementById('quickCacheInfo').innerHTML = `<div style="color:var(--danger);font-size:0.82rem">${e.message}</div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// CACHE
+// ═══════════════════════════════════════════════════════════
+function debouncedCacheLoad() {
+  clearTimeout(cacheDebounceTimer);
+  cacheDebounceTimer = setTimeout(() => loadCacheList(), 400);
+}
+
+async function loadCacheList(cursor) {
+  const prefix = document.getElementById('cacheSearch').value.trim();
+  cacheCurrentPrefix = prefix;
+  const tbody = document.getElementById('cacheTableBody');
+  tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:16px"><span class="spinner"></span></td></tr>`;
+
+  const params = new URLSearchParams({ limit: 50 });
+  if (prefix) params.set('prefix', prefix);
+  if (cursor) params.set('cursor', cursor);
+
+  try {
+    const res  = await adminFetch('/admin/cache/list?' + params);
+    const data = await res.json();
+    if (data.error) { tbody.innerHTML = `<tr><td colspan="3" style="color:var(--danger);padding:16px">${data.error}</td></tr>`; return; }
+
+    const keys = data.keys || [];
+    document.getElementById('cacheCount').textContent =
+      `Показани: ${keys.length}${data.list_complete ? '' : '+'} записа`;
+
+    if (!keys.length) {
+      tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:20px">Няма записи</td></tr>`;
+    } else {
+      tbody.innerHTML = keys.map(k => `
+        <tr>
+          <td class="td-key" title="${escHtml(k.name)}">${escHtml(k.name)}</td>
+          <td>${k.expiration ? new Date(k.expiration * 1000).toLocaleString('bg-BG') : '—'}</td>
+          <td>
+            <div class="td-actions">
+              <button class="btn-icon" onclick="viewEntry('${escAttr(k.name)}')" title="Виж">👁</button>
+              <button class="btn-icon" style="color:var(--danger)" onclick="deleteEntry('${escAttr(k.name)}')" title="Изтрий">🗑</button>
+            </div>
+          </td>
+        </tr>`).join('');
+    }
+
+    // Pagination
+    const pg = document.getElementById('cachePagination');
+    pg.innerHTML = '';
+    if (!data.list_complete && data.cursor) {
+      cacheNextCursor = data.cursor;
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-ghost btn-sm';
+      btn.textContent = 'Зареди още →';
+      btn.onclick = () => loadCacheList(cacheNextCursor);
+      pg.appendChild(btn);
+    }
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="3" style="color:var(--danger);padding:16px">${e.message}</td></tr>`;
+  }
+}
+
+async function viewEntry(key) {
+  document.getElementById('entryModal').classList.remove('hidden');
+  document.getElementById('entryModalTitle').textContent = key;
+  document.getElementById('entryModalBody').innerHTML = '<span class="spinner"></span>';
+  try {
+    const res  = await adminFetch('/admin/cache/entry?key=' + encodeURIComponent(key));
+    const data = await res.json();
+    document.getElementById('entryModalBody').innerHTML = syntaxHighlight(JSON.stringify(data.value ?? data, null, 2));
+  } catch (e) {
+    document.getElementById('entryModalBody').textContent = 'Грешка: ' + e.message;
+  }
+}
+
+function closeEntryModal() {
+  document.getElementById('entryModal').classList.add('hidden');
+}
+
+async function deleteEntry(key) {
+  if (!confirm(`Изтрий записа:\n${key}?`)) return;
+  try {
+    const res  = await adminFetch('/admin/cache/entry?key=' + encodeURIComponent(key), { method: 'DELETE' });
+    const data = await res.json();
+    if (data.deleted) { toast('Записът е изтрит', 'success'); loadCacheList(); }
+    else toast(data.error || 'Грешка при изтриване', 'error');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function confirmFlush() {
+  if (!confirm('Изтрий ВСИЧКИ кеширани резултати? Това действие е необратимо!')) return;
+  try {
+    const res  = await adminFetch('/admin/cache/flush', { method: 'DELETE' });
+    const data = await res.json();
+    if (data.flushed) { toast(`Изчистено: ${data.deletedCount} записа`, 'success'); loadCacheList(); }
+    else toast(data.error || 'Грешка', 'error');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════
+// AI TEST
+// ═══════════════════════════════════════════════════════════
+function updateTestModels() {
+  const prov = document.getElementById('testProvider').value;
+  populateModels('testModel', prov);
+}
+
+function updatePipelineModels() {
+  const prov = document.getElementById('pipelineProvider').value;
+  populateModels('pipelineModel', prov);
+}
+
+function populateModels(selectId, provider) {
+  const sel = document.getElementById(selectId);
+  sel.innerHTML = '<option value="">-- Default (от Worker) --</option>';
+  const list = provider === 'gemini' ? GEMINI_MODELS : provider === 'openai' ? OPENAI_MODELS : [];
+  list.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    sel.appendChild(opt);
+  });
+}
+
+async function runAiTest() {
+  const btn = document.getElementById('testAiBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Изчакай…';
+  const body = {
+    prompt:      document.getElementById('testPrompt').value,
+    ai_provider: document.getElementById('testProvider').value || undefined,
+    ai_model:    document.getElementById('testModel').value    || undefined,
+  };
+  const t0 = Date.now();
+  try {
+    const res  = await adminFetch('/admin/test-ai', { method: 'POST', body: JSON.stringify(body) });
+    const data = await res.json();
+    const ms   = Date.now() - t0;
+
+    document.getElementById('aiTestResult').style.display = 'block';
+    document.getElementById('aiTestMeta').innerHTML = `
+      <span>${data.provider || '?'} / ${data.model || '?'}</span>
+      <span>${data.durationMs ?? ms}ms</span>
+      <span class="badge ${data.ok ? 'badge-green' : 'badge-red'}">${data.ok ? 'OK' : 'ERROR'}</span>`;
+    document.getElementById('aiTestOutput').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
+  } catch (e) {
+    document.getElementById('aiTestResult').style.display = 'block';
+    document.getElementById('aiTestOutput').textContent = 'Мрежова грешка: ' + e.message;
+  }
+  btn.disabled = false; btn.innerHTML = '▶ Изпрати към AI';
+}
+
+// ═══════════════════════════════════════════════════════════
+// PIPELINE TEST
+// ═══════════════════════════════════════════════════════════
+function onPipelineFileChange() {
+  const file = document.getElementById('pipelineFile').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('pipelineImg').src = e.target.result;
+    document.getElementById('pipelinePreview').style.display = 'block';
+    document.getElementById('pipelineBtn').disabled = false;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function runPipeline() {
+  const file = document.getElementById('pipelineFile').files[0];
+  if (!file) { toast('Изберете изображение', 'error'); return; }
+
+  const btn = document.getElementById('pipelineBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Анализира…';
+
+  const bar = document.getElementById('pipelineStatusBar');
+  bar.className = 'pipeline-status idle'; bar.textContent = '⟳ Пайплайнът тече…';
+  document.getElementById('pipelineResult').style.display = 'block';
+  document.getElementById('pipelineOutput').innerHTML = '<span class="spinner"></span> CALL1 (detect)… → CALL2 (verify)… → CALL3 (report)…';
+
+  try {
+    // Convert image to base64
+    const b64 = await fileToBase64(file);
+    const fd  = new FormData();
+    fd.append('strip_image', b64);
+    fd.append('side', document.getElementById('pipelineSide').value);
+    const prov  = document.getElementById('pipelineProvider').value;
+    const model = document.getElementById('pipelineModel').value;
+    if (prov)  fd.append('ai_provider', prov);
+    if (model) fd.append('ai_model', model);
+    const q = document.getElementById('pipelineQuestionnaire').value.trim();
+    if (q) fd.append('questionnaire', q);
+
+    const headers = {};
+    if (ADMIN_SECRET) headers['Authorization'] = `Bearer ${ADMIN_SECRET}`;
+
+    const t0  = Date.now();
+    const res = await fetch(WORKER_URL + '/analyze', { method: 'POST', headers, body: fd });
+    const data = await res.json();
+    const ms  = Date.now() - t0;
+
+    lastPipelineResult = data;
+    const hasError = data?.result?.error || !data.result;
+    bar.className = 'pipeline-status ' + (hasError ? 'err' : 'ok');
+    bar.textContent = hasError
+      ? `⚠ Грешка — ${data?.result?.error?.message || 'вижте JSON'}`
+      : `✓ Анализът завърши за ${(ms/1000).toFixed(1)}s  |  cached: ${data.cached}  |  model: ${data.model}`;
+    document.getElementById('pipelineOutput').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
+  } catch (e) {
+    bar.className = 'pipeline-status err'; bar.textContent = '⚠ ' + e.message;
+    document.getElementById('pipelineOutput').textContent = e.message;
+  }
+  btn.disabled = false; btn.innerHTML = '▶ Стартирай анализ';
+}
+
+function copyResult() {
+  if (!lastPipelineResult) return;
+  navigator.clipboard.writeText(JSON.stringify(lastPipelineResult, null, 2))
+    .then(() => toast('Копирано!', 'success'))
+    .catch(() => toast('Копирането е неуспешно', 'error'));
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = e => resolve(e.target.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODELS
+// ═══════════════════════════════════════════════════════════
+async function loadModels() {
+  try {
+    const res  = await adminFetch('/admin/models');
+    const data = await res.json();
+    renderModels(data);
+  } catch (e) {
+    document.getElementById('modelsCard').innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+function renderModels(data) {
+  const card = document.getElementById('modelsCard');
+  if (!data || typeof data !== 'object') { card.innerHTML = '<div>Не може да зареди</div>'; return; }
+
+  let html = '';
+  for (const [provider, info] of Object.entries(data)) {
+    const models = info.models || [];
+    html += `
+      <div style="margin-bottom:18px">
+        <h3 class="sub-title">${escHtml(provider.toUpperCase())}
+          ${info.default ? `<span class="badge badge-blue" style="margin-left:8px">default</span>` : ''}
+        </h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          ${models.map(m => `<span class="model-chip">${escHtml(m)}</span>`).join('')}
+        </div>
+        ${info.note ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:6px">${escHtml(info.note)}</div>` : ''}
+      </div>`;
+  }
+  card.innerHTML = html || '<div style="color:var(--text-muted)">Няма данни</div>';
+}
+
+// ═══════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════
+function syntaxHighlight(json) {
+  json = escHtml(json);
+  return json.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    match => {
+      let cls = 'jn';
+      if (/^"/.test(match)) { cls = /:$/.test(match) ? 'jk' : 'jv'; }
+      else if (/true|false/.test(match)) cls = 'jb';
+      else if (/null/.test(match)) cls = 'jnl';
+      return `<span class="${cls}">${match}</span>`;
+    }
+  );
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function escAttr(str) {
+  return String(str).replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = type === 'success' ? 'show-success' : 'show-error';
+  setTimeout(() => { el.className = 'hidden'; }, 3000);
+}
+
+// ═══════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  const savedUrl    = sessionStorage.getItem('adminUrl');
+  const savedSecret = sessionStorage.getItem('adminSecret');
+  if (savedUrl) {
+    document.getElementById('loginUrl').value = savedUrl;
+    document.getElementById('loginSecret').value = savedSecret || '';
+    WORKER_URL = savedUrl; ADMIN_SECRET = savedSecret || '';
+    document.getElementById('loginOverlay').classList.add('hidden');
+    document.getElementById('topbarUrl').textContent = WORKER_URL;
+    init();
+  }
+  // Enter key on login
+  document.getElementById('loginSecret').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+  // Close modal on backdrop click
+  document.getElementById('entryModal').addEventListener('click', e => {
+    if (e.target === document.getElementById('entryModal')) closeEntryModal();
+  });
+});
+</script>
+</body>
+</html>

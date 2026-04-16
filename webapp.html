@@ -438,7 +438,7 @@
             <h3>⚙️ AI Сървър (Cloudflare Worker)</h3>
             <input type="text" id="workerUrl" class="config-input" 
                    placeholder="https://your-worker.workers.dev" 
-                   value="">
+                   value="https://iris.radilov-k.workers.dev">
             <p class="config-hint">Оставете празно за работа само с обработка на изображения (без AI анализ)</p>
             
             <!-- AI Model Selection -->
@@ -587,8 +587,8 @@
         </div>
         
         <div class="footer">
-            Iris 3.0 - Работи изцяло в браузъра<br>
-            Снимките не се изпращат на сървър (освен при AI анализ)
+            Iris 3.0 — Обработка изцяло в браузъра (OpenCV.js)<br>
+            AI анализ: 1 заявка към Cloudflare Worker (Gemini)
         </div>
     </div>
     
@@ -1256,50 +1256,159 @@
             }
         }
         
-        // Render AI results
-        function renderAIResults(container, analysis) {
-            if (!analysis || analysis.error) {
-                container.innerHTML = `<p style="color: var(--danger);">⚠️ ${analysis?.error || 'Грешка при AI анализа'}</p>`;
+        // Render AI results — handles v10 unified response format
+        function renderAIResults(container, response) {
+            if (!response) {
+                container.innerHTML = '<p style="color: var(--danger);">⚠️ Грешка при AI анализа</p>';
                 container.style.display = 'block';
                 return;
             }
-            
-            let html = '';
-            
-            // Summary
-            if (analysis.summary) {
-                html += `
-                    <h4>📝 Обобщение</h4>
-                    <div class="report-text">${escapeHtml(analysis.summary)}</div>
-                `;
+
+            // Handle error responses
+            if (response.error) {
+                const errMsg = typeof response.error === 'string' ? response.error
+                    : (response.error.message || response.error.detail || JSON.stringify(response.error));
+                container.innerHTML = `<p style="color: var(--danger);">⚠️ ${escapeHtml(errMsg)}</p>`;
+                container.style.display = 'block';
+                return;
             }
-            
-            // Findings
-            if (analysis.findings && analysis.findings.length > 0) {
-                html += `
-                    <h4>🔍 Находки (${analysis.findings.length})</h4>
-                    <div class="findings-grid">
-                `;
-                analysis.findings.forEach(f => {
-                    const status = f.severity === 'high' ? 'concern' : (f.severity === 'medium' ? 'attention' : 'normal');
-                    html += `
-                        <div class="finding-card ${status}">
-                            <strong>${escapeHtml(f.type || 'Находка')}</strong>
-                            <div style="font-size:0.8rem;color:var(--text-muted)">${escapeHtml(f.location || '')}</div>
-                        </div>
-                    `;
+
+            // Extract data — handle both nested (from worker) and flat formats
+            const data = response.result || response;
+            if (data.error) {
+                const errMsg = typeof data.error === 'string' ? data.error
+                    : (data.error.message || JSON.stringify(data.error));
+                container.innerHTML = `<p style="color: var(--danger);">⚠️ ${escapeHtml(errMsg)}</p>`;
+                container.style.display = 'block';
+                return;
+            }
+
+            const analysis = data.analysis || {};
+            const advice = data.advice || {};
+            const pipeline = data.pipeline || {};
+            let html = '';
+
+            // Overall Health Score
+            if (analysis.overallHealth != null) {
+                const healthColor = analysis.overallHealth >= 70 ? 'var(--success)' :
+                                    analysis.overallHealth >= 45 ? 'var(--warning)' : 'var(--danger)';
+                html += `<div style="text-align:center;margin:15px 0">
+                    <div style="font-size:2rem;font-weight:bold;color:${healthColor}">${analysis.overallHealth}/100</div>
+                    <div style="color:var(--text-muted);font-size:0.85rem">Общо здраве на ириса</div>
+                </div>`;
+            }
+
+            // System Scores
+            if (analysis.systemScores && analysis.systemScores.length > 0) {
+                html += '<h4>📊 Системни оценки</h4><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:15px">';
+                analysis.systemScores.forEach(s => {
+                    const c = s.score >= 70 ? 'var(--success)' : s.score >= 45 ? 'var(--warning)' : 'var(--danger)';
+                    html += `<div style="background:var(--bg-control);padding:8px 12px;border-radius:6px;border-left:3px solid ${c}">
+                        <strong>${escapeHtml(s.system)}</strong>: <span style="color:${c}">${s.score}</span>
+                        <div style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(s.description || '')}</div>
+                    </div>`;
                 });
                 html += '</div>';
             }
-            
-            // Full report
-            if (analysis.report) {
-                html += `
-                    <h4>📄 Пълен доклад</h4>
-                    <div class="report-text">${escapeHtml(analysis.report)}</div>
-                `;
+
+            // Zone Analysis
+            if (analysis.zones && analysis.zones.length > 0) {
+                const activeZones = analysis.zones.filter(z => z.status !== 'normal');
+                if (activeZones.length > 0) {
+                    html += `<h4>🔍 Зони с находки (${activeZones.length})</h4><div style="display:grid;gap:6px;margin-bottom:15px">`;
+                    activeZones.forEach(z => {
+                        const statusIcon = z.status === 'concern' ? '🔴' : '🟡';
+                        const borderColor = z.status === 'concern' ? 'var(--danger)' : 'var(--warning)';
+                        html += `<div style="background:var(--bg-control);padding:8px 12px;border-radius:6px;border-left:3px solid ${borderColor}">
+                            <strong>${statusIcon} ${escapeHtml(z.name)} — ${escapeHtml(z.organ || '')}</strong>
+                            <div style="font-size:0.8rem;color:var(--text-muted)">${escapeHtml(z.findings || '')}</div>
+                        </div>`;
+                    });
+                    html += '</div>';
+                }
             }
-            
+
+            // Artifacts
+            if (analysis.artifacts && analysis.artifacts.length > 0) {
+                html += `<h4>🔎 Основни находки (${analysis.artifacts.length})</h4><div style="display:grid;gap:6px;margin-bottom:15px">`;
+                analysis.artifacts.forEach(a => {
+                    const sevColor = a.severity === 'high' ? 'var(--danger)' : a.severity === 'medium' ? 'var(--warning)' : 'var(--text-muted)';
+                    html += `<div style="background:var(--bg-control);padding:8px 12px;border-radius:6px;border-left:3px solid ${sevColor}">
+                        <strong>${escapeHtml(a.type || '')}</strong> <span style="color:var(--text-muted)">(${escapeHtml(a.location || '')})</span>
+                        <div style="font-size:0.8rem">${escapeHtml(a.description || '')}</div>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+
+            // Collarette Profile
+            if (analysis.collaretteProfile) {
+                const cp = analysis.collaretteProfile;
+                html += `<h4>🔵 Колартен профил</h4>
+                <div style="background:var(--bg-control);padding:10px;border-radius:6px;margin-bottom:15px">
+                    <div><strong>Статус:</strong> ${escapeHtml(cp.status || '')}</div>
+                    <div><strong>Интегритет:</strong> ${escapeHtml(cp.integrity || '')}</div>
+                    ${cp.clinicalNote ? `<div style="margin-top:6px;font-size:0.85rem;color:var(--text-muted)">${escapeHtml(cp.clinicalNote)}</div>` : ''}
+                </div>`;
+            }
+
+            // Advice
+            if (advice.priorities && advice.priorities.length > 0) {
+                html += '<h4>💡 Препоръки</h4><div style="background:var(--bg-control);padding:10px;border-radius:6px;margin-bottom:15px">';
+                html += '<strong>Приоритети:</strong><ul style="margin:5px 0;padding-left:20px">';
+                advice.priorities.forEach(p => { html += `<li>${escapeHtml(p)}</li>`; });
+                html += '</ul>';
+
+                if (advice.nutrition) {
+                    if (advice.nutrition.focus && advice.nutrition.focus.length > 0) {
+                        html += '<strong>🥗 Хранене — фокус:</strong><ul style="margin:5px 0;padding-left:20px">';
+                        advice.nutrition.focus.forEach(f => { html += `<li>${escapeHtml(f)}</li>`; });
+                        html += '</ul>';
+                    }
+                    if (advice.nutrition.limit && advice.nutrition.limit.length > 0) {
+                        html += '<strong>🚫 Ограничаване:</strong><ul style="margin:5px 0;padding-left:20px">';
+                        advice.nutrition.limit.forEach(l => { html += `<li>${escapeHtml(l)}</li>`; });
+                        html += '</ul>';
+                    }
+                }
+
+                if (advice.lifestyle) {
+                    const lsItems = [];
+                    if (advice.lifestyle.sleep) lsItems.push(...advice.lifestyle.sleep.map(s => '😴 ' + s));
+                    if (advice.lifestyle.stress) lsItems.push(...advice.lifestyle.stress.map(s => '🧘 ' + s));
+                    if (advice.lifestyle.activity) lsItems.push(...advice.lifestyle.activity.map(s => '🏃 ' + s));
+                    if (lsItems.length > 0) {
+                        html += '<strong>Начин на живот:</strong><ul style="margin:5px 0;padding-left:20px">';
+                        lsItems.forEach(i => { html += `<li>${escapeHtml(i)}</li>`; });
+                        html += '</ul>';
+                    }
+                }
+
+                if (advice.followUp && advice.followUp.length > 0) {
+                    html += '<strong>📋 Последващи действия:</strong><ul style="margin:5px 0;padding-left:20px">';
+                    advice.followUp.forEach(f => { html += `<li>${escapeHtml(f)}</li>`; });
+                    html += '</ul>';
+                }
+                html += '</div>';
+            }
+
+            // Pipeline details (constitution, etc.) — collapsed
+            if (pipeline.global) {
+                const g = pipeline.global;
+                html += `<details style="margin-bottom:15px"><summary style="cursor:pointer;color:var(--accent)">🧬 Детайли (конституция, диатеза)</summary>
+                <div style="background:var(--bg-control);padding:10px;border-radius:6px;margin-top:6px">
+                    <div><strong>Конституция:</strong> ${escapeHtml(g.constitution || 'unclear')}</div>
+                    <div><strong>Диспозиция:</strong> ${escapeHtml(g.disposition || 'unclear')}</div>
+                    <div><strong>ANW:</strong> ${escapeHtml(g.ANW_status || 'unclear')}</div>
+                    ${g.diathesis ? `<div><strong>Диатеза:</strong> ${g.diathesis.map(d => escapeHtml(d.code || d)).join(', ')}</div>` : ''}
+                </div></details>`;
+            }
+
+            // Cached indicator
+            if (response.cached) {
+                html += '<div style="text-align:center;color:var(--text-muted);font-size:0.75rem;margin-top:8px">📦 Кеширан резултат</div>';
+            }
+
             container.innerHTML = html || '<p>Няма допълнителна информация от AI анализа.</p>';
             container.style.display = 'block';
         }
