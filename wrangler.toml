@@ -7,12 +7,18 @@ main            = "worker.js"
 compatibility_date = "2024-09-23"
 
 # ─── KV Namespace ───────────────────────────────────────────────────────────────
-# Create with: wrangler kv namespace create IRIS_KV
-# Then replace the placeholder IDs below with the real ones from the output.
-[[kv_namespaces]]
-binding    = "IRIS_KV"
-id         = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
+# To enable KV (required for saving settings from the admin panel and for caching):
+#   1. Run:  wrangler kv namespace create IRIS_KV
+#   2. Copy the returned 'id' and 'preview_id' into the block below, then uncomment it.
+#   3. Redeploy: wrangler deploy
+#
+# Without KV the worker still functions; AI results won't be cached and settings
+# cannot be saved from the admin panel (use [vars] + wrangler secret put AI_API_KEY).
+#
+# [[kv_namespaces]]
+# binding    = "IRIS_KV"
+# id         = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+# preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
 
 # ─── Environment Variables ───────────────────────────────────────────────────
 [vars]
@@ -61,10 +67,13 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 # ─── Quick-start instructions ────────────────────────────────────────────────────
 # 1. Install Wrangler:       npm install -g wrangler
 # 2. Log in:                 wrangler login
-# 3. Create KV namespace:    wrangler kv namespace create IRIS_KV
-#    Copy the 'id' and 'preview_id' from the output into this file.
-# 4. Set API key secret:     wrangler secret put AI_API_KEY
-# 5. Deploy:                 wrangler deploy
+# 3. Set API key secret:     wrangler secret put AI_API_KEY
+# 4. Deploy (no KV needed):  wrangler deploy
+#
+# Optional — enable KV for result caching and admin-panel config saving:
+#   a. wrangler kv namespace create IRIS_KV
+#   b. Copy the returned 'id' and 'preview_id' into the [[kv_namespaces]] block above.
+#   c. Uncomment the [[kv_namespaces]] block and redeploy.
 #
 # ─── API Endpoints ───────────────────────────────────────────────────────────────
 #
