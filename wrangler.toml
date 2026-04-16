@@ -20,16 +20,10 @@ preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
 # This can be overridden per-request via the ai_provider form field
 AI_PROVIDER = "gemini"
 
-# DEFAULT AI model to use (must support vision for STEP1, STEP2A, STEP2B)
+# DEFAULT AI model to use (must support vision)
 # This can be overridden per-request via the ai_model form field
 #
-# OpenAI options:
-#   "gpt-4o"      — Premium flagship model ($2.50-5/M input, best vision & reasoning)
-#   "gpt-4o-mini" — Cost-effective ($0.15/M input, 15-25x cheaper, strong vision)
-#   "gpt-4-turbo" — Previous flagship with vision
-#   "o1-preview"  — Advanced reasoning model (no vision support)
-#
-# Gemini options (recommended for 2026):
+# Gemini options (recommended):
 #   "gemini-2.5-flash-preview-04-17" — Latest 2.5 Flash preview (best quality)
 #   "gemini-2.5-flash-latest"        — 2.5 Flash rolling alias
 #   "gemini-2.0-flash"               — Stable 2.0 Flash (recommended default)
@@ -37,11 +31,10 @@ AI_PROVIDER = "gemini"
 #   "gemini-1.5-pro-latest"          — Stable 1.5 Pro fallback
 #   "gemini-1.5-flash-latest"        — Fast and efficient 1.5 Flash
 #
-# OpenAI-compatible options (for Claude, Ollama, etc.):
-#   "claude-3-opus-20240229"   — Claude 3 Opus (via Anthropic API)
-#   "claude-3-sonnet-20240229" — Claude 3 Sonnet
-#   "claude-3-haiku-20240307"  — Claude 3 Haiku (fast)
-#   "llava-v1.6-34b"           — Local LLaVA model (via Ollama)
+# OpenAI options:
+#   "gpt-4o"      — Premium flagship model
+#   "gpt-4o-mini" — Cost-effective
+#   "gpt-4-turbo" — Previous flagship with vision
 #
 AI_MODEL    = "gemini-2.0-flash"
 
@@ -72,9 +65,9 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 # ─── API Endpoints ───────────────────────────────────────────────────────────────
 #
 #   POST /analyze
-#     Analyze an unwrapped iris strip image.
+#     Analyze an unwrapped iris strip image with a single AI call.
 #     Form fields:
-#       strip_image   — base64 JPEG from app.py (/process endpoint, "mapped" field)
+#       strip_image   — base64 JPEG of the unwrapped iris strip
 #       side          — "R" or "L"
 #       image_hash    — optional unique ID (auto-generated if omitted)
 #       questionnaire — optional JSON: {"age":30,"gender":"female","complaints":"..."}
