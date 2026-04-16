@@ -246,7 +246,7 @@ async function aiCallOpenAI(env, prompt, imageDataUrl) {
     model,
     messages: [{ role: 'user', content: userContent }],
     temperature: 0.1,
-    max_tokens: 16384,
+    max_tokens: 16384, // v10: single comprehensive prompt needs larger output budget
     response_format: { type: 'json_object' },
   };
 
@@ -303,7 +303,7 @@ async function aiCallGemini(env, prompt, imageDataUrl) {
     contents: [{ parts }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 16384,
+      maxOutputTokens: 16384, // v10: single comprehensive prompt needs larger output budget
       responseMimeType: 'application/json'
     }
   };
