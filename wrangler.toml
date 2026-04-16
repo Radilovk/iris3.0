@@ -65,7 +65,10 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 # ─── API Endpoints ───────────────────────────────────────────────────────────────
 #
 #   POST /analyze
-#     Analyze an unwrapped iris strip image with a single AI call.
+#     Analyze an unwrapped iris strip image with 3-call precision pipeline:
+#       CALL1 (vision): Full detection — geo + structural + pigment + collarette
+#       CALL2 (vision): Verification — re-examine image, validate, zone mapping, profile
+#       CALL3 (text):   Report — Bulgarian UI format with advice
 #     Form fields:
 #       strip_image   — base64 JPEG of the unwrapped iris strip
 #       side          — "R" or "L"

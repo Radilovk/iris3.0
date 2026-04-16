@@ -1,14 +1,18 @@
 /**
  * worker.js — Cloudflare Worker
- * Iris Iridology Analysis Pipeline v10 — Single AI Call Architecture
+ * Iris Iridology Analysis Pipeline v11 — 3-Call Precision Architecture
  *
- * Architecture:
- *   1. POST /analyze  — receive unwrapped iris strip + metadata, run 1 AI call
- *   2. GET  /result/:side/:hash — retrieve a cached analysis result
+ * Architecture (3 AI calls for maximum precision, no Flask needed):
+ *   CALL 1 (vision+image): Full Detection — geo calibration + structural + pigment + ANW collarette
+ *   CALL 2 (vision+image): Verification — re-examine image with CALL1 findings, validate, refine, zone map
+ *   CALL 3 (text only):    Report — synthesize into Bulgarian UI format with advice
  *
- * Innovation: All 8 previous pipeline steps (STEP1–STEP5) are consolidated into
- * a single comprehensive vision prompt. This reduces Cloudflare/AI API usage from
- * 8 requests per analysis to just 1, while producing identical output format.
+ * Why 3 calls:
+ *   - CALL 1 gets max token budget for thorough initial detection with image
+ *   - CALL 2 re-examines the image knowing what was found — catches misses, corrects false positives
+ *   - CALL 3 has full context from verified findings — produces precise Bulgarian report
+ *   - Each call has focused role → better precision than one overloaded prompt
+ *   - 3 calls vs 8 original → 62% fewer API requests while maintaining quality
  *
  * Environment bindings (set in wrangler.toml / Cloudflare dashboard):
  *   IRIS_KV         — KV namespace for caching results
@@ -126,16 +130,18 @@ function handleHealthCheck(env) {
 
   return jsonResp({
     status: hasApiKey ? 'healthy' : 'degraded',
-    version: 'v10.0-single-call',
+    version: 'v11.0-3call-precision',
     provider,
     model,
     apiKeyConfigured: hasApiKey,
     kvConfigured: !!env.IRIS_KV,
+    pipelineSteps: 3,
+    pipelineDescription: 'CALL1(vision:detect) → CALL2(vision:verify+map) → CALL3(text:report)',
   });
 }
 
 // =====================================================================
-// ROUTE: POST /analyze — Single AI Call Pipeline
+// ROUTE: POST /analyze — 3-Call Precision Pipeline
 // =====================================================================
 async function handleAnalyze(request, env) {
   const form = await request.formData();
@@ -164,29 +170,18 @@ async function handleAnalyze(request, env) {
   try {
     cached = await env.IRIS_KV.get(cacheKey, 'json');
   } catch (kvErr) {
+    // KV read failure is non-fatal; proceed to run the pipeline
     console.error('KV get error:', kvErr?.message || kvErr);
   }
   if (cached) {
     return jsonResp({ cached: true, imageHash, side, model: effectiveModel, result: cached });
   }
 
-  // Build mega prompt and make single AI call
-  const imageDataUrl = `data:image/jpeg;base64,${stripB64}`;
-  const prompt = buildMegaPrompt(side, imageHash, questionnaire);
-  const result = await aiCall(effectiveEnv, prompt, imageDataUrl);
+  // Run 3-call pipeline
+  const pipeline = new IrisPipeline(effectiveEnv, stripB64, side, imageHash, questionnaire);
+  const result = await pipeline.run();
 
-  // If AI returned an error, wrap it
-  if (result.error) {
-    return jsonResp({
-      cached: false,
-      imageHash,
-      side,
-      model: effectiveModel,
-      result: { error: result.error, stage: 'ANALYSIS', imageHash, side }
-    });
-  }
-
-  // Store in KV with 24-hour TTL
+  // Store in KV with 24-hour TTL (even errors, to avoid hammering AI on bad images)
   await env.IRIS_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
 
   return jsonResp({ cached: false, imageHash, side, model: effectiveModel, result });
@@ -213,6 +208,62 @@ async function handleGetResult(key, env) {
     return jsonResp({ error: 'Result not found or expired (24h TTL)' }, 404);
   }
   return jsonResp({ cached: true, result });
+}
+
+// =====================================================================
+// 3-CALL PIPELINE CLASS
+// =====================================================================
+class IrisPipeline {
+  constructor(env, stripB64, side, imageHash, questionnaire) {
+    this.env          = env;
+    this.imageB64     = stripB64;
+    this.imageDataUrl = `data:image/jpeg;base64,${stripB64}`;
+    this.side         = side;
+    this.imageHash    = imageHash;
+    this.questionnaire = questionnaire;
+  }
+
+  async run() {
+    // ── CALL 1: Full Detection (vision + image) ──────────────────────
+    // Geo calibration + structural + pigment + ANW collarette — all in one vision call
+    const call1 = await this.visionCall(promptCall1_Detect(this.side, this.imageHash));
+    if (call1.error) {
+      return { error: call1.error || call1, stage: 'CALL1_DETECT', imageHash: this.imageHash, side: this.side };
+    }
+
+    // ── CALL 2: Verification & Zone Mapping (vision + image) ─────────
+    // Re-examine image with CALL1's findings: validate, refine, consistency check, zone mapping
+    const call2 = await this.visionCall(promptCall2_Verify(this.side, this.imageHash, call1));
+    if (call2.error) {
+      return { error: call2.error || call2, stage: 'CALL2_VERIFY', imageHash: this.imageHash, side: this.side };
+    }
+
+    // ── CALL 3: Report Generation (text only — no image needed) ──────
+    // Synthesize verified findings into Bulgarian UI format with advice
+    const call3 = await this.textCall(
+      promptCall3_Report(this.side, this.imageHash, call1, call2, this.questionnaire)
+    );
+
+    return {
+      imageHash: this.imageHash,
+      side: this.side,
+      ...call3,
+      // Merge raw pipeline steps into call3's pipeline for debugging
+      pipeline: {
+        ...(call3.pipeline || {}),
+        _call1: call1,
+        _call2: call2,
+      },
+    };
+  }
+
+  async visionCall(prompt) {
+    return aiCall(this.env, prompt, this.imageDataUrl);
+  }
+
+  async textCall(prompt) {
+    return aiCall(this.env, prompt, null);
+  }
 }
 
 // =====================================================================
@@ -246,7 +297,7 @@ async function aiCallOpenAI(env, prompt, imageDataUrl) {
     model,
     messages: [{ role: 'user', content: userContent }],
     temperature: 0.1,
-    max_tokens: 16384, // v10: single comprehensive prompt needs larger output budget
+    max_tokens: 16384,
     response_format: { type: 'json_object' },
   };
 
@@ -303,7 +354,7 @@ async function aiCallGemini(env, prompt, imageDataUrl) {
     contents: [{ parts }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 16384, // v10: single comprehensive prompt needs larger output budget
+      maxOutputTokens: 16384,
       responseMimeType: 'application/json'
     }
   };
@@ -334,7 +385,7 @@ async function aiCallGemini(env, prompt, imageDataUrl) {
 }
 
 // =====================================================================
-// IMAGE FORMAT PREAMBLE
+// IMAGE FORMAT PREAMBLE (shared across vision calls)
 // =====================================================================
 const IMAGE_FORMAT = `\
 ================================================================================
@@ -442,118 +493,417 @@ const MAP_V9 = [
 ];
 
 // =====================================================================
-// MEGA PROMPT — Single comprehensive vision analysis
+// CALL 1: FULL DETECTION (vision + image)
+// Combines: STEP1 geo + STEP2A structural + STEP2B pigment + STEP2B_ANW collarette
 // =====================================================================
-function buildMegaPrompt(side, imageHash, questionnaire) {
-  const q = questionnaire || {};
+function promptCall1_Detect(side, imageHash) {
   return `${IMAGE_FORMAT}
 
 ================================================================================
-IRIS_COMPREHENSIVE_ANALYSIS — Single-Pass Full Report (v10)
+CALL1: COMPREHENSIVE IRIS DETECTION — Geo + Structural + Pigment + Collarette
 ================================================================================
 
-ROLE: expert_iridologist_v10
-MODE: image_parse_only + full_report
-INPUT: unwrapped_iris_strip (rectangular image as described in IMAGE_FORMAT above)
+ROLE: expert_iridologist_detector_v11
+MODE: image_parse_only
+INPUT: unwrapped_iris_strip (rectangular image as described above)
 SIDE: ${side}
 IMG_ID: ${imageHash}
-QUESTIONNAIRE: ${JSON.stringify(q)}
 
-You are an expert iridologist performing a COMPLETE analysis of this unwrapped iris
-strip image in a SINGLE pass. You must perform ALL of the following tasks and produce
-ONE unified JSON output.
+You are performing a THOROUGH first-pass detection of ALL iris features.
+Take your time — precision is critical. This is the foundation for the entire analysis.
 
 ================================================================================
-TASK 1: GEO CALIBRATION & QUALITY CHECK
+PART A: GEO CALIBRATION & QUALITY CHECK
 ================================================================================
 
-- Verify the strip is a valid unwrapped iris with visible grid labels.
-- Assess image quality: focus (good/med/poor), glare (none/low/med/high),
-  occlusion (none/low/med/high).
-- Identify eyelid-masked (white/blank) regions and specular/glare patches.
-- If the strip is unusable (>35% white, poor focus throughout, invalid strip),
-  return ONLY: {"error":{"stage":"ANALYSIS","code":"LOW_QUALITY","message":"<reason>","canRetry":true}}
+1. Verify the strip is a valid unwrapped iris with visible grid labels.
+2. Assess image quality:
+   - focus: good | med | poor (is iris fiber texture clearly visible?)
+   - glare: none | low | med | high (bright washed-out patches?)
+   - occlusion: none | low | med | high (white/blank eyelid bands?)
+3. Identify eyelid-masked (white/blank) regions → mark as invalidRegions.
+4. Identify specular/glare patches → mark as invalidRegions.
+5. Quality score 0-100 based on focus clarity, glare extent, occlusion area.
+6. usableUpperIris: true if minutes [57-59] and [0-3] are NOT mostly white/blank.
+7. refRay15Usable: true if minute-15 column is visible and free of masking.
+
+QUALITY GATE — if ANY of these is true, return error:
+- focus="poor" throughout
+- >35% of strip is white/blank
+- Strip is not a valid iris strip
+→ return: {"error":{"stage":"CALL1","code":"LOW_QUALITY","message":"<reason>","canRetry":true}}
 
 ================================================================================
-TASK 2: STRUCTURAL DETECTION (what was STEP2A)
+PART B: STRUCTURAL DETECTION
 ================================================================================
 
-Detect STRUCTURAL findings only (no organ names, no diagnosis):
+Detect STRUCTURAL findings only (NO organ names, NO diagnosis):
   lacuna | crypt | giant_lacuna | atrophic_area | collarette_defect_lesion |
   radial_furrow | deep_radial_cleft | transversal_fiber | structural_asymmetry
 
-For each finding: type, minuteRange, ringRange, size (xs/s/m/l), confidence (0-1).
-IGNORE white/blank eyelid bands and glare patches.
+For each: type, minuteRange [start, end], ringRange [start, end], size (xs/s/m/l),
+          notes (<=60 chars), confidence (0.0-1.0).
 
-Definitions:
-- lacuna: oval gap breaking fiber flow, horizontally elongated in strip
-- crypt: small deep dark triangular hole with sharp edges
-- radial_furrow: narrow VERTICAL dark stripe from ANW outward
-- deep_radial_cleft: wider VERTICAL dark stripe, broader than furrow
-- transversal_fiber: DIAGONAL line crossing radial fibers
+IGNORE: White/blank eyelid-masked bands, glare/specular patches.
+
+DEFINITIONS (how features appear in the UNWRAPPED STRIP):
+- lacuna: horizontally elongated oval gap breaking fiber flow, lighter interior
+- crypt: small deep dark triangular/rhomboid hole with sharp edges
+- giant_lacuna: very large lacuna ≥8 minutes wide
+- atrophic_area: absent/flattened fiber texture (NOT glare, NOT white band — dull, texture-free)
 - collarette_defect_lesion: notch/break on ANW (rings R2-R3)
+- radial_furrow: narrow VERTICAL dark stripe (1-3 min wide) from ANW outward
+- deep_radial_cleft: wider VERTICAL dark stripe (4-8 min wide), deeper than furrow
+- transversal_fiber: DIAGONAL line crossing radial fibers at an angle
+- structural_asymmetry: visible fiber density/texture difference between strip halves
+
+RANGE RULES:
+- minuteRange NEVER wraps. Split [57,3] into [57,59] + [0,3] as two findings.
+- ringRange: start ≤ end always.
+- Point-like findings: width ≥ ±1 minute (min width = 2).
+- Very wide (>20 min OR >3 rings): confidence -= 0.15; drop if <0.55.
 
 ================================================================================
-TASK 3: PIGMENT & RING DETECTION (what was STEP2B)
+PART C: PIGMENT & RING DETECTION
 ================================================================================
 
-Detect:
-  pigment_spot | pigment_cloud | pigment_band | brushfield_like_spots |
+Detect pigment/ring features:
+  pigment_spot (subtype: orange_rust|brown_black|yellow|other) |
+  pigment_cloud | pigment_band | brushfield_like_spots |
   nerve_rings | lymphatic_rosary | scurf_rim | sodium_ring
 
-Assess global traits:
+DEFINITIONS:
+- pigment_spot: bounded colored spot on fibers, no structural gap beneath
+- pigment_cloud: diffuse haze with soft gradual edges, spanning multiple min/rings
+- pigment_band: HORIZONTAL colored stripe running left-to-right, 1-2 ring rows
+- brushfield_like_spots: scattered pale tiny dots in R9-R11
+- nerve_rings: HORIZONTAL arc(s) running full strip width, structural stress lines
+- lymphatic_rosary: chain of discrete pale nodules in R10 area (not a continuous band)
+- scurf_rim: dark HORIZONTAL band at R11 (bottom edge of strip content)
+- sodium_ring: pale/milky HORIZONTAL band near R9-R11
+
+Assess GLOBAL TRIAD:
 - constitution: LYM | HEM | BIL | unclear
 - disposition: SILK | LINEN | BURLAP | unclear
-- diathesis_tags: HAC | LRS | LIP | DYS (with confidence)
-
-Assess ANW/collarette:
-- ANW_status: expanded | contracted | broken | normal | mixed | unclear
-- Divide the collarette into 12 segments of 5 minutes each (seg 1: min 0-5, ..., seg 12: min 55-60)
-- For each visible segment: position (high/mid/low), shape, thickness, integrity, ringCenter
+- diathesis_tags: HAC | LRS | LIP | DYS (each with confidence 0-1)
 
 ================================================================================
-TASK 4: ZONE MAPPING (what was STEP3)
+PART D: ANW / COLLARETTE CONTOUR PROFILING
 ================================================================================
 
-Match each finding to the most specific zone from this MAP using side + minuteRange + ringRange overlap:
+The collarette (ANW) is the wavy band visible in rows R2-R3 (~50-100px from strip top).
+Divide into 12 segments of 5 minutes each:
+  Seg 1: min 0-5, Seg 2: min 5-10, ..., Seg 12: min 55-60
+
+For EACH visible segment:
+- position: high (near R2, contracted) | mid (R2-R3, normal) | low (near R3+, expanded)
+- ringCenter: approximate ring position as decimal (e.g., 2.3, 2.8, 3.1)
+- shape: normal | expanded | contracted | broken | notched | ballooning | flattened
+- thickness: thin (<15px/<0.6 rings) | normal (15-30px) | thick (>30px/>1.2 rings)
+- integrity: sharp | fuzzy | absent
+- If segment is masked (white/eyelid): visible=false
+
+ANW_status overall: expanded | contracted | broken | normal | mixed | unclear
+
+List ANW defects: breaks, notches, ballooning with minuteRange + ringRange + notes.
+
+contourSummary: avgRingCenter, minRingCenter, maxRingCenter, expandedSegments[],
+contractedSegments[], brokenSegments[], overallIntegrity (good|moderate|poor).
+
+================================================================================
+OUTPUT — JSON ONLY — EXACT STRUCTURE:
+================================================================================
+
+{
+  "imgId": "${imageHash}",
+  "side": "${side}",
+  "quality": {
+    "ok": true,
+    "score0_100": 0,
+    "focus": "good|med|poor",
+    "glare": "none|low|med|high",
+    "occlusion": "none|low|med|high",
+    "usableUpperIris": true,
+    "refRay15Usable": true,
+    "invalidRegions": [
+      {"type":"specular|eyelid_band","minuteRange":[0,0],"ringRange":[0,0]}
+    ]
+  },
+  "structural": [
+    {"type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","notes":"<=60","confidence":0.0}
+  ],
+  "pigment": [
+    {"type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","notes":"<=60","confidence":0.0}
+  ],
+  "global": {
+    "constitution": "LYM|HEM|BIL|unclear",
+    "disposition": "SILK|LINEN|BURLAP|unclear",
+    "diathesis": [{"code":"HAC|LRS|LIP|DYS","confidence":0.0}]
+  },
+  "collarette": {
+    "ANW_status": "expanded|contracted|broken|normal|mixed|unclear",
+    "confidence": 0.0,
+    "segments": [
+      {"seg":1,"minuteRange":[0,5],"visible":true,"position":"high|mid|low","ringCenter":2.5,"shape":"normal|expanded|contracted|broken|notched|ballooning|flattened","thickness":"thin|normal|thick","integrity":"sharp|fuzzy|absent","confidence":0.0}
+    ],
+    "defects": [
+      {"type":"break|notch|ballooning|lesion|pigment_on_ANW","minuteRange":[0,0],"ringRange":[2,3],"notes":"<=60","confidence":0.0}
+    ],
+    "contourSummary": {
+      "avgRingCenter": 2.5,
+      "minRingCenter": 2.0,
+      "maxRingCenter": 3.0,
+      "expandedSegments": [],
+      "contractedSegments": [],
+      "brokenSegments": [],
+      "overallIntegrity": "good|moderate|poor"
+    }
+  }
+}
+
+FAILSAFE:
+{"error":{"stage":"CALL1","code":"LOW_QUALITY|INVALID_STRIP|FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
+}
+
+// =====================================================================
+// CALL 2: VERIFICATION & ZONE MAPPING (vision + image)
+// Combines: STEP2C consistency + STEP3 zone mapper + STEP4 profile builder
+// Re-examines image to verify CALL1 findings
+// =====================================================================
+function promptCall2_Verify(side, imageHash, call1) {
+  return `${IMAGE_FORMAT}
+
+================================================================================
+CALL2: VERIFICATION, CONSISTENCY & ZONE MAPPING — Re-examine with Known Findings
+================================================================================
+
+ROLE: expert_iridologist_verifier_v11
+MODE: image_parse_only + data_integration
+INPUT: unwrapped_iris_strip (same image as CALL1) + CALL1 detection results
+SIDE: ${side}
+IMG_ID: ${imageHash}
+
+CALL1_RESULTS: ${JSON.stringify(call1)}
+
+You have the INITIAL DETECTION results from CALL1. Now RE-EXAMINE the actual image
+to VERIFY, REFINE, and CORRECT. This is your chance to catch false positives,
+find missed features, and ensure precision.
+
+================================================================================
+PART A: VERIFICATION — Re-examine image against CALL1 findings
+================================================================================
+
+For EACH structural finding from CALL1:
+1. Look at the stated minuteRange + ringRange in the actual image.
+2. CONFIRM the finding exists (keep with same or adjusted confidence).
+3. CORRECT minuteRange/ringRange if they seem off after careful re-examination.
+4. REJECT if the area is actually white/blank (eyelid mask), glare, or normal tissue.
+   Move rejected findings to "dropped" with reason.
+
+For EACH pigment finding from CALL1:
+1. Re-examine the actual image area.
+2. CONFIRM, CORRECT ranges, or REJECT with reason.
+
+CHECK FOR MISSED FINDINGS:
+- Carefully scan the entire strip for features that CALL1 may have missed.
+- Add any newly detected findings to the verified lists.
+
+================================================================================
+PART B: CONSISTENCY RULES (apply to verified findings)
+================================================================================
+
+CONTRADICTION RULES:
+1) scurf_rim vs sodium_ring: same area → keep sodium_ring if light/milky; keep scurf_rim if dark.
+2) pigment_spot vs lacuna/crypt: overlapping → keep structural; drop pigment.
+3) lymphatic_rosary vs brushfield_like_spots: same area → keep rosary if chain/arc of discrete nodules.
+4) Specular contamination: drop findings overlapping invalidRegions >25%.
+5) collarette_defect_lesion vs ANW defects: same minuteRange → merge, keep ANW defect detail.
+
+DEDUP/MERGE: Same type + minute overlap >60% AND ring overlap >60% → merge (union ranges, max confidence).
+
+RANGE NORMALIZATION:
+- Clamp minutes 0..59, rings 0..11.
+- minuteRange NEVER wraps: split if start > end.
+- Very wide (>20 min OR >3 rings) → confidence -= 0.15; drop if <0.55.
+- usableUpperIris=false: findings in [57..59] or [0..3] → confidence -= 0.10.
+
+COLLARETTE:
+- collarette ringRange MUST be [2, 3]. Clamp if inconsistent, confidence -= 0.20.
+- Cross-check ANW status: if structural defects contradict, note the discrepancy.
+
+================================================================================
+PART C: ZONE MAPPING — Match findings to anatomical zones
+================================================================================
+
+Match each VERIFIED finding to the most specific zone from MAP_V9 below using
+(side + minuteRange + ringRange overlap):
 
 ${JSON.stringify(MAP_V9.filter(z => z.side === side || z.side === 'ANY'))}
 
-Tie-break: prefer side-specific over ANY, prefer smaller zone area.
+MATCH RULE: zone matches if:
+- zone.side == "${side}" or zone.side == "ANY"
+- finding.minuteRange overlaps zone.mins (max(starts) ≤ min(ends))
+- finding.ringRange overlaps zone.rings
+
+TIE-BREAK: prefer side-specific over ANY, prefer smaller zone area.
 
 ================================================================================
-TASK 5: REPORT GENERATION (what was STEP5 — Bulgarian)
+PART D: PROFILE BUILD — Derive health axes and channels
 ================================================================================
 
-Generate the final report in BULGARIAN for the frontend UI.
+From the verified and mapped findings, compute:
+1. Constitution/disposition/diathesis from global traits.
+2. ANW profile from collarette segments.
+3. Elimination channels: gut_ANW → kidney → lymph → skin (status + evidence).
+4. Axes: stress (0-100), digestive (0-100), immune (0-100).
+5. Hypotheses: preventive health claims citing specific findings + zones.
 
-MINUTE-TO-ZONE CONVERSION (for 12 UI zones):
-  Zone  1 ("12-1ч"):  minutes  0-5   -> degrees   0-30
-  Zone  2 ("1-2ч"):   minutes  5-10  -> degrees  30-60
-  Zone  3 ("2-3ч"):   minutes 10-15  -> degrees  60-90
-  Zone  4 ("3-4ч"):   minutes 15-20  -> degrees  90-120
-  Zone  5 ("4-5ч"):   minutes 20-25  -> degrees 120-150
-  Zone  6 ("5-6ч"):   minutes 25-30  -> degrees 150-180
-  Zone  7 ("6-7ч"):   minutes 30-35  -> degrees 180-210
-  Zone  8 ("7-8ч"):   minutes 35-40  -> degrees 210-240
-  Zone  9 ("8-9ч"):   minutes 40-45  -> degrees 240-270
-  Zone 10 ("9-10ч"):  minutes 45-50  -> degrees 270-300
-  Zone 11 ("10-11ч"): minutes 50-55  -> degrees 300-330
-  Zone 12 ("11-12ч"): minutes 55-60  -> degrees 330-360
+================================================================================
+OUTPUT — JSON ONLY — EXACT STRUCTURE:
+================================================================================
+
+{
+  "imgId": "${imageHash}",
+  "side": "${side}",
+  "verified_structural": [
+    {"fid":"S1","type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","notes":"<=60","confidence":0.0,"zone":{"id":"...","organ_bg":"...","system_bg":"..."},"status":"confirmed|corrected|new"}
+  ],
+  "verified_pigment": [
+    {"fid":"P1","type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","notes":"<=60","confidence":0.0,"zone":{"id":"...","organ_bg":"...","system_bg":"..."},"status":"confirmed|corrected|new"}
+  ],
+  "collarette_verified": {
+    "ANW_status": "expanded|contracted|broken|normal|mixed|unclear",
+    "confidence": 0.0,
+    "segments": [
+      {"seg":1,"minuteRange":[0,5],"visible":true,"position":"high|mid|low","ringCenter":2.5,"shape":"normal|expanded|contracted|broken|notched|ballooning|flattened","thickness":"thin|normal|thick","integrity":"sharp|fuzzy|absent","confidence":0.0}
+    ],
+    "defects": [
+      {"type":"break|notch|ballooning|lesion","minuteRange":[0,0],"ringRange":[2,3],"notes":"<=60","confidence":0.0}
+    ],
+    "contourSummary": {
+      "avgRingCenter":2.5,"minRingCenter":2.0,"maxRingCenter":3.0,
+      "expandedSegments":[],"contractedSegments":[],"brokenSegments":[],
+      "overallIntegrity":"good|moderate|poor"
+    }
+  },
+  "global_verified": {
+    "constitution": "LYM|HEM|BIL|unclear",
+    "disposition": "SILK|LINEN|BURLAP|unclear",
+    "diathesis": [{"code":"HAC|LRS|LIP|DYS","confidence":0.0}],
+    "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
+  },
+  "zoneSummary": [
+    {"zoneId":"...","organ_bg":"...","system_bg":"...","evidenceCount":0,"topTypes":["type:count"]}
+  ],
+  "profile": {
+    "axesScore": {"stress0_100":0,"digestive0_100":0,"immune0_100":0},
+    "elimChannels": [
+      {"channel":"gut_ANW","status":"normal|attention|concern","evidence":[{"fid":"S1","zoneId":"..."}]},
+      {"channel":"kidney","status":"normal|attention|concern","evidence":[]},
+      {"channel":"lymph","status":"normal|attention|concern","evidence":[]},
+      {"channel":"skin_scu","status":"normal|attention|concern","evidence":[]}
+    ],
+    "ANW_profile": {
+      "overallIntegrity":"good|moderate|poor",
+      "expandedSectors":"...",
+      "contractedSectors":"...",
+      "brokenSectors":"...",
+      "clinicalNote":"<=120 chars"
+    }
+  },
+  "dropped": [
+    {"type":"...","minuteRange":[0,0],"reason":"contradiction|specular|eyelid_band|too_wide|low_confidence|duplicate|false_positive"}
+  ],
+  "warnings": ["<=60 chars"]
+}
+
+FAILSAFE:
+{"error":{"stage":"CALL2","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
+}
+
+// =====================================================================
+// CALL 3: REPORT GENERATION (text only — no image)
+// Combines: STEP5 Bulgarian report
+// =====================================================================
+function promptCall3_Report(side, imageHash, call1, call2, questionnaire) {
+  const q = questionnaire || {};
+  return `IRIS PIPELINE — CALL3: Bulgarian Report Generation (v11)
+
+ROLE: iris_frontend_report_generator_bg_v11
+MODE: strict_json_only (NO image — text synthesis only)
+
+INPUTS:
+  DETECTION = ${JSON.stringify(call1)}
+  VERIFIED  = ${JSON.stringify(call2)}
+  QUESTIONNAIRE = ${JSON.stringify(q)}
+  SIDE = ${side}
+  IMG_ID = ${imageHash}
+
+PREREQ: If VERIFIED.error exists → return error JSON.
+
+You have VERIFIED detection results (CALL2 output). Synthesize them into the
+final Bulgarian-language UI report. This is a TEXT-ONLY call — no image analysis.
+
+================================================================================
+CORE TRUTH RULE:
+- ORGAN and SYSTEM names MUST come from VERIFIED.zoneSummary and VERIFIED.verified_structural / verified_pigment zone fields.
+- The 12 UI zones below are DISPLAY BUCKETS ONLY.
 
 VALIDATION PRIORITY (cross-reference with QUESTIONNAIRE):
-  1) HIGH   — confirmed by questionnaire
-  2) MEDIUM — not mentioned (preventive)
-  3) LOW    — contradicts questionnaire
+  1) ВИСОК — потвърдено от въпросника (highest weight)
+  2) СРЕДЕН — не е споменато (preventive, medium weight)
+  3) НИСЪК — противоречи (flag it, do not emphasize)
+
+MINUTE-TO-ZONE CONVERSION:
+  Zone  1 ("12-1ч"):  minutes  0-5   → degrees 0-30
+  Zone  2 ("1-2ч"):   minutes  5-10  → degrees 30-60
+  Zone  3 ("2-3ч"):   minutes 10-15  → degrees 60-90
+  Zone  4 ("3-4ч"):   minutes 15-20  → degrees 90-120
+  Zone  5 ("4-5ч"):   minutes 20-25  → degrees 120-150
+  Zone  6 ("5-6ч"):   minutes 25-30  → degrees 150-180
+  Zone  7 ("6-7ч"):   minutes 30-35  → degrees 180-210
+  Zone  8 ("7-8ч"):   minutes 35-40  → degrees 210-240
+  Zone  9 ("8-9ч"):   minutes 40-45  → degrees 240-270
+  Zone 10 ("9-10ч"):  minutes 45-50  → degrees 270-300
+  Zone 11 ("10-11ч"): minutes 50-55  → degrees 300-330
+  Zone 12 ("11-12ч"): minutes 55-60  → degrees 330-360
+
+HOW TO FILL EACH ZONE:
+- Collect VERIFIED findings whose center minute falls in the zone's range.
+- Determine dominant organ/system by: weight = confidence + severity_bonus(lacuna=+0.1, crypt=+0.15, cleft=+0.15)
+- status: concern (strong evidence + HIGH questionnaire) | attention (medium evidence) | normal (little/no evidence)
+- findings: brief Bulgarian summary ≤ 60 chars
+
+ARTIFACTS (2-5 strongest from VERIFIED):
+  Prioritize: lacuna, crypt, radial_furrow, deep_radial_cleft, nerve_rings,
+              pigment_spot, sodium_ring, scurf_rim, lymphatic_rosary, ANW defects
+  location format: clock string (minute 0→"12:00", 5→"1:00", 10→"2:00", 15→"3:00", etc.)
+
+COLLARETTE PROFILE (from VERIFIED.collarette_verified + VERIFIED.profile.ANW_profile):
+  - status: Bulgarian label
+  - integrity: Bulgarian
+  - 12 segments with shape/position in Bulgarian
+  - defects with clock location
+  - clinicalNote ≤ 120 chars Bulgarian
+
+SYSTEM SCORES (always exactly 6):
+  Храносмилателна | Имунна | Нервна | Сърдечно-съдова | Детоксикация | Ендокринна
+  score 0-100 based on VERIFIED.profile.axesScore + zone evidence
+  description ≤ 60 chars Bulgarian
+
+ADVICE (Bulgarian, all values ≤ 120 chars):
+  priorities: 3-6 bullets | nutrition.focus: 3-6 | nutrition.limit: 3-6
+  lifestyle.sleep: 2-4 | lifestyle.stress: 2-4 | lifestyle.activity: 2-4
+  followUp: 2-5 bullets
 
 ================================================================================
-OUTPUT — JSON ONLY — EXACT STRUCTURE BELOW
+OUTPUT — JSON ONLY — EXACT STRUCTURE:
 ================================================================================
 
 {
   "analysis": {
     "zones": [
-      {"id":1,"name":"12-1ч","organ":"<БГ орган от MAP>","status":"normal|attention|concern","findings":"<=60 chars БГ","angle":[0,30]},
+      {"id":1,"name":"12-1ч","organ":"<БГ>","status":"normal|attention|concern","findings":"<=60 БГ","angle":[0,30]},
       {"id":2,"name":"1-2ч","organ":"...","status":"...","findings":"<=60","angle":[30,60]},
       {"id":3,"name":"2-3ч","organ":"...","status":"...","findings":"<=60","angle":[60,90]},
       {"id":4,"name":"3-4ч","organ":"...","status":"...","findings":"<=60","angle":[90,120]},
@@ -591,10 +941,10 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE BELOW
     ]
   },
   "advice": {
-    "priorities": ["<=120 chars БГ bullet 1", "..."],
-    "nutrition": {"focus": ["<=120 chars"], "limit": ["<=120 chars"]},
+    "priorities": ["<=120 chars БГ"],
+    "nutrition": {"focus": ["<=120"], "limit": ["<=120"]},
     "lifestyle": {"sleep": ["<=120"], "stress": ["<=120"], "activity": ["<=120"]},
-    "followUp": ["<=120 chars"]
+    "followUp": ["<=120"]
   },
   "pipeline": {
     "quality": {
@@ -610,10 +960,10 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE BELOW
       "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
     },
     "structuralFindings": [
-      {"type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","zone":"zone_id","organ_bg":"...","confidence":0.0}
+      {"fid":"S1","type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","zone":"zone_id","organ_bg":"...","confidence":0.0}
     ],
     "pigmentFindings": [
-      {"type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","zone":"zone_id","organ_bg":"...","confidence":0.0}
+      {"fid":"P1","type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","zone":"zone_id","organ_bg":"...","confidence":0.0}
     ]
   }
 }
@@ -622,16 +972,15 @@ RULES:
 - JSON ONLY output, no markdown, no extra text
 - All UI text in BULGARIAN
 - No double quotes inside string values
-- findings text <= 60 chars, descriptions <= 60 chars, advice <= 120 chars
+- findings ≤ 60 chars, descriptions ≤ 60 chars, advice ≤ 120 chars
 - severity: low|medium|high
 - Always output exactly 12 zones, exactly 6 systemScores
 - 2-5 artifacts (strongest findings)
-- organ names MUST come from the zone MAP provided above
-- minuteRange NEVER wraps: split [57,3] into two findings
-- IGNORE white/blank eyelid-masked areas — do NOT report findings there
+- organ names MUST come from the zone MAP
+- IGNORE white/blank eyelid-masked areas
 
-FAILSAFE — if image is unusable, return ONLY:
-{"error":{"stage":"ANALYSIS","code":"LOW_QUALITY|INVALID_STRIP","message":"<short reason>","canRetry":true}}`;
+FAILSAFE:
+{"error":{"stage":"CALL3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
 }
 
 // =====================================================================
