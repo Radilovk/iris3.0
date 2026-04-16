@@ -396,6 +396,9 @@
       <li><a onclick="switchTab('models')" id="nav-models">
         <span class="icon">📋</span><span class="label"> Модели</span>
       </a></li>
+      <li><a onclick="switchTab('settings')" id="nav-settings">
+        <span class="icon">⚙️</span><span class="label"> Настройки</span>
+      </a></li>
     </ul>
     <div class="sidebar-footer">
       <button onclick="logout()">🚪 Изход</button>
@@ -588,6 +591,79 @@
       </div>
     </div>
 
+    <!-- ═══ SETTINGS ═══ -->
+    <div class="tab-panel" id="tab-settings">
+      <h2 class="section-title">⚙️ Настройки на AI</h2>
+
+      <div class="card" id="settingsStatusCard" style="display:none">
+        <div class="card-header">
+          <h3>📊 Текуща конфигурация</h3>
+        </div>
+        <div id="settingsStatusBody"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>🔑 API Ключ и Доставчик</h3>
+        </div>
+
+        <div class="field-group">
+          <label>AI Доставчик (Provider)</label>
+          <select id="cfgProvider" onchange="onCfgProviderChange()">
+            <option value="gemini">Google Gemini</option>
+            <option value="openai">OpenAI</option>
+            <option value="openai-compatible">OpenAI-съвместим</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label>AI Модел</label>
+          <select id="cfgModelSelect" onchange="document.getElementById('cfgModel').value=this.value" style="margin-bottom:6px">
+            <option value="">-- изберете или въведете по-долу --</option>
+          </select>
+          <input type="text" id="cfgModel" placeholder="напр. gemini-2.0-flash или gpt-4o">
+        </div>
+
+        <div class="field-group">
+          <label>API Ключ <span style="color:var(--text-muted);font-weight:400">(оставете празно за да запазите текущия)</span></label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="password" id="cfgApiKey" placeholder="Въведете нов API ключ…" style="flex:1">
+            <button class="btn-icon" title="Покажи/скрий" onclick="toggleCfgKeyVisibility()">👁</button>
+          </div>
+          <div id="cfgApiKeyStatus" style="font-size:0.75rem;color:var(--text-muted);margin-top:4px"></div>
+        </div>
+
+        <div id="cfgOpenAIUrlGroup" class="field-group" style="display:none">
+          <label>OpenAI Base URL</label>
+          <input type="url" id="cfgBaseUrl" placeholder="https://api.openai.com/v1">
+        </div>
+
+        <div id="cfgGeminiUrlGroup" class="field-group">
+          <label>Gemini API URL</label>
+          <input type="url" id="cfgGeminiUrl" placeholder="https://generativelanguage.googleapis.com/v1beta">
+        </div>
+
+        <hr class="divider">
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="cfgSaveBtn" onclick="saveSettings()">💾 Запази настройките</button>
+          <button class="btn btn-ghost" id="cfgResetBtn" onclick="resetSettings()" title="Изтрий KV настройките и използвай env vars">🗑 Изчисти (използвай env vars)</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadSettings()">⟳ Обнови</button>
+        </div>
+
+        <div id="cfgSaveResult" style="margin-top:12px;font-size:0.82rem;display:none"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>ℹ️ Как работи</h3></div>
+        <div style="font-size:0.82rem;color:var(--text-muted);line-height:1.7">
+          <p>Настройките се съхраняват в Cloudflare KV (<code>config:ai</code>) и имат предимство пред env vars в <code>wrangler.toml</code>.</p>
+          <p style="margin-top:8px">Ако KV не е конфигуриран, настройките не могат да се запазят тук — ползвайте <code>wrangler.toml</code> и <code>wrangler secret put AI_API_KEY</code>.</p>
+          <p style="margin-top:8px">API ключът се съхранява в KV и <strong>не се връща</strong> при четене — само дали е зададен.</p>
+        </div>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -671,6 +747,7 @@ function init() {
   refreshDashboard();
   loadCacheList();
   loadModels();
+  loadSettings();
 }
 
 function switchTab(id) {
@@ -714,9 +791,11 @@ function renderHealth(data, status) {
   const items = [
     { k: 'version',              v: data.version || '?',               dot: null },
     { k: 'status',               v: data.status,                        dot: isHealthy ? 'green' : 'red' },
+    { k: 'configSource',         v: data.configSource || '?',           dot: null },
     { k: 'provider',             v: data.provider || '?',               dot: null },
     { k: 'model',                v: data.model || '?',                  dot: null },
     { k: 'apiKeyConfigured',     v: data.apiKeyConfigured ? 'YES' : 'NO', dot: data.apiKeyConfigured ? 'green' : 'red' },
+    { k: 'apiKeySource',         v: data.apiKeySource || '?',           dot: null },
     { k: 'kvConfigured',         v: data.kvConfigured ? 'YES' : 'NO',    dot: data.kvConfigured ? 'green' : 'yellow' },
     { k: 'adminSecretConfigured',v: data.adminSecretConfigured ? 'YES' : 'NO (open)', dot: data.adminSecretConfigured ? 'green' : 'yellow' },
     { k: 'pipelineSteps',        v: data.pipelineSteps ?? '?',          dot: null },
@@ -1011,6 +1090,134 @@ function renderModels(data) {
       </div>`;
   }
   card.innerHTML = html || '<div style="color:var(--text-muted)">Няма данни</div>';
+}
+
+// ═══════════════════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════════════════
+const CFG_GEMINI_MODELS = [
+  'gemini-2.0-flash', 'gemini-2.5-flash-preview-04-17', 'gemini-2.5-flash-latest',
+  'gemini-2.0-flash-lite', 'gemini-1.5-pro-latest', 'gemini-1.5-flash-latest',
+];
+const CFG_OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'];
+
+function onCfgProviderChange() {
+  const prov = document.getElementById('cfgProvider').value;
+  const openAiGrp  = document.getElementById('cfgOpenAIUrlGroup');
+  const geminiGrp  = document.getElementById('cfgGeminiUrlGroup');
+  openAiGrp.style.display  = (prov === 'openai' || prov === 'openai-compatible') ? '' : 'none';
+  geminiGrp.style.display  = prov === 'gemini' ? '' : 'none';
+
+  const sel = document.getElementById('cfgModelSelect');
+  sel.innerHTML = '<option value="">-- изберете или въведете по-долу --</option>';
+  const list = prov === 'gemini' ? CFG_GEMINI_MODELS : prov === 'openai' ? CFG_OPENAI_MODELS : [];
+  list.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    sel.appendChild(opt);
+  });
+}
+
+function toggleCfgKeyVisibility() {
+  const inp = document.getElementById('cfgApiKey');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+async function loadSettings() {
+  try {
+    const res  = await adminFetch('/admin/config');
+    if (!res.ok) {
+      if (res.status === 401) return; // already handled by logout
+      return;
+    }
+    const data = await res.json();
+
+    document.getElementById('cfgProvider').value = data.provider || 'gemini';
+    document.getElementById('cfgModel').value    = data.model    || '';
+    document.getElementById('cfgBaseUrl').value  = data.baseUrl  || '';
+    document.getElementById('cfgGeminiUrl').value = data.geminiApiUrl || '';
+    document.getElementById('cfgApiKey').value   = '';
+
+    const keyStatus = document.getElementById('cfgApiKeyStatus');
+    if (data.apiKeyConfigured) {
+      keyStatus.innerHTML = `<span style="color:var(--success)">✓ API ключ е зададен (${data.apiKeySource})</span>`;
+    } else {
+      keyStatus.innerHTML = `<span style="color:var(--danger)">✗ API ключ НЕ е зададен</span>`;
+    }
+
+    onCfgProviderChange();
+
+    const statusCard = document.getElementById('settingsStatusCard');
+    const statusBody = document.getElementById('settingsStatusBody');
+    statusCard.style.display = '';
+    const srcBadge = data.source === 'kv'
+      ? '<span class="badge badge-blue">KV override</span>'
+      : '<span class="badge badge-yellow">env vars</span>';
+    statusBody.innerHTML = `
+      <div class="health-item"><span class="key">Источник</span><span class="val">${srcBadge}</span></div>
+      <div class="health-item"><span class="key">provider</span><span class="val">${escHtml(data.provider || '?')}</span></div>
+      <div class="health-item"><span class="key">model</span><span class="val">${escHtml(data.model || '?')}</span></div>
+      <div class="health-item"><span class="key">apiKeyConfigured</span><span class="val">${data.apiKeyConfigured
+        ? '<span style="color:var(--success)">YES (' + escHtml(data.apiKeySource) + ')</span>'
+        : '<span style="color:var(--danger)">NO</span>'}</span></div>`;
+  } catch (e) {
+    // silently fail on init
+  }
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('cfgSaveBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Запазване…';
+  const resultEl = document.getElementById('cfgSaveResult');
+  resultEl.style.display = 'none';
+
+  const body = {
+    provider:     document.getElementById('cfgProvider').value,
+    model:        document.getElementById('cfgModel').value.trim(),
+    baseUrl:      document.getElementById('cfgBaseUrl').value.trim(),
+    geminiApiUrl: document.getElementById('cfgGeminiUrl').value.trim(),
+  };
+  const apiKey = document.getElementById('cfgApiKey').value.trim();
+  if (apiKey) body.apiKey = apiKey;
+
+  try {
+    const res  = await adminFetch('/admin/config', { method: 'POST', body: JSON.stringify(body) });
+    const data = await res.json();
+    if (res.ok && data.saved) {
+      toast('Настройките са запазени ✓', 'success');
+      resultEl.style.display = '';
+      resultEl.style.color = 'var(--success)';
+      resultEl.textContent = `Запазено: ${data.provider} / ${data.model}  |  API ключ: ${data.apiKeyConfigured ? 'зададен' : 'не е зададен'}`;
+      document.getElementById('cfgApiKey').value = '';
+      await loadSettings();
+    } else {
+      resultEl.style.display = '';
+      resultEl.style.color = 'var(--danger)';
+      resultEl.textContent = `Грешка: ${data.error || JSON.stringify(data)}`;
+    }
+  } catch (e) {
+    resultEl.style.display = '';
+    resultEl.style.color = 'var(--danger)';
+    resultEl.textContent = 'Мрежова грешка: ' + e.message;
+  }
+  btn.disabled = false; btn.innerHTML = '💾 Запази настройките';
+}
+
+async function resetSettings() {
+  if (!confirm('Изтрий KV настройките и върни се към env vars (wrangler.toml)?\n\nAPI ключът в KV ще бъде изтрит!')) return;
+  const btn = document.getElementById('cfgResetBtn');
+  btn.disabled = true;
+  try {
+    const res  = await adminFetch('/admin/config', { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok && data.deleted) {
+      toast('KV настройките са изчистени — ползват се env vars', 'success');
+      await loadSettings();
+    } else {
+      toast(data.error || 'Грешка при изчистване', 'error');
+    }
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false;
 }
 
 // ═══════════════════════════════════════════════════════════

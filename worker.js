@@ -164,7 +164,8 @@ async function handleAnalyze(request, env) {
     return jsonResp({ error: 'side must be "R" or "L"' }, 400);
   }
 
-  const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel);
+  const kvConfig = await getKVConfig(env);
+  const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel, kvConfig);
   const effectiveModel = effectiveEnv.AI_MODEL;
   const cacheKey = `result:${side}:${imageHash}:${effectiveModel}`;
 
@@ -190,14 +191,14 @@ async function handleAnalyze(request, env) {
   return jsonResp({ cached: false, imageHash, side, model: effectiveModel, result });
 }
 
-function createEffectiveEnv(env, aiProvider, aiModel) {
+function createEffectiveEnv(env, aiProvider, aiModel, kvConfig) {
   return {
     IRIS_KV: env.IRIS_KV,
-    AI_API_KEY: env.AI_API_KEY,
-    AI_BASE_URL: env.AI_BASE_URL,
-    GEMINI_API_URL: env.GEMINI_API_URL,
-    AI_PROVIDER: aiProvider || env.AI_PROVIDER || 'gemini',
-    AI_MODEL: aiModel || env.AI_MODEL || 'gemini-2.0-flash',
+    AI_API_KEY: kvConfig?.apiKey || env.AI_API_KEY,
+    AI_BASE_URL: kvConfig?.baseUrl || env.AI_BASE_URL,
+    GEMINI_API_URL: kvConfig?.geminiApiUrl || env.GEMINI_API_URL,
+    AI_PROVIDER: aiProvider || kvConfig?.provider || env.AI_PROVIDER || 'gemini',
+    AI_MODEL: aiModel || kvConfig?.model || env.AI_MODEL || 'gemini-2.0-flash',
   };
 }
 
@@ -1006,16 +1007,22 @@ async function handleAdmin(request, env, url) {
 
   // GET /admin/health — extended worker health + config
   if (method === 'GET' && path === '/admin/health') {
+    const kvConfig = await getKVConfig(env);
+    const effectiveApiKey = kvConfig?.apiKey || env.AI_API_KEY;
+    const effectiveProvider = kvConfig?.provider || env.AI_PROVIDER || 'gemini';
+    const effectiveModel = kvConfig?.model || env.AI_MODEL || 'gemini-2.0-flash';
     return jsonResp({
-      status: env.AI_API_KEY ? 'healthy' : 'degraded',
+      status: effectiveApiKey ? 'healthy' : 'degraded',
       version: 'v11.0-3call-precision',
-      provider: env.AI_PROVIDER || 'gemini',
-      model: env.AI_MODEL || 'gemini-2.0-flash',
-      apiKeyConfigured: !!env.AI_API_KEY,
+      provider: effectiveProvider,
+      model: effectiveModel,
+      apiKeyConfigured: !!effectiveApiKey,
+      apiKeySource: kvConfig?.apiKey ? 'kv' : (env.AI_API_KEY ? 'env' : 'none'),
+      configSource: kvConfig ? 'kv' : 'env',
       adminSecretConfigured: !!env.ADMIN_SECRET,
       kvConfigured: !!env.IRIS_KV,
-      aiBaseUrl: env.AI_BASE_URL || 'https://api.openai.com/v1',
-      geminiApiUrl: env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta',
+      aiBaseUrl: kvConfig?.baseUrl || env.AI_BASE_URL || 'https://api.openai.com/v1',
+      geminiApiUrl: kvConfig?.geminiApiUrl || env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta',
       pipelineSteps: 3,
       pipelineDescription: 'CALL1(vision:detect) → CALL2(vision:verify+map) → CALL3(text:report)',
       timestamp: new Date().toISOString(),
@@ -1076,7 +1083,8 @@ async function handleAdmin(request, env, url) {
     const aiProvider = body.ai_provider || null;
     const aiModel    = body.ai_model || null;
     const prompt     = body.prompt || 'Reply with exactly: {"status":"ok","message":"AI is working"}';
-    const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel);
+    const kvConfig = await getKVConfig(env);
+    const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel, kvConfig);
     const t0 = Date.now();
     try {
       const raw = await aiCall(effectiveEnv, prompt, null);
@@ -1103,7 +1111,70 @@ async function handleAdmin(request, env, url) {
     return handleGetModels(env);
   }
 
+  // GET /admin/config — read effective AI configuration (KV override or env)
+  if (method === 'GET' && path === '/admin/config') {
+    const kvConfig = await getKVConfig(env);
+    const hasKV = kvConfig !== null;
+    return jsonResp({
+      source: hasKV ? 'kv' : 'env',
+      provider: kvConfig?.provider || env.AI_PROVIDER || 'gemini',
+      model: kvConfig?.model || env.AI_MODEL || 'gemini-2.0-flash',
+      apiKeyConfigured: !!(kvConfig?.apiKey || env.AI_API_KEY),
+      apiKeySource: kvConfig?.apiKey ? 'kv' : (env.AI_API_KEY ? 'env' : 'none'),
+      baseUrl: kvConfig?.baseUrl || env.AI_BASE_URL || 'https://api.openai.com/v1',
+      geminiApiUrl: kvConfig?.geminiApiUrl || env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta',
+    });
+  }
+
+  // POST /admin/config — save AI configuration to KV
+  if (method === 'POST' && path === '/admin/config') {
+    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured — cannot store settings' }, 503);
+    const body = await request.json().catch(() => ({}));
+    const existing = await getKVConfig(env) || {};
+    const newConfig = {
+      provider: body.provider || existing.provider || env.AI_PROVIDER || 'gemini',
+      model: body.model || existing.model || env.AI_MODEL || 'gemini-2.0-flash',
+      baseUrl: body.baseUrl !== undefined ? body.baseUrl : (existing.baseUrl || env.AI_BASE_URL || 'https://api.openai.com/v1'),
+      geminiApiUrl: body.geminiApiUrl !== undefined ? body.geminiApiUrl : (existing.geminiApiUrl || env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta'),
+    };
+    if (body.apiKey && body.apiKey.trim()) {
+      newConfig.apiKey = body.apiKey.trim();
+    } else if (existing.apiKey) {
+      newConfig.apiKey = existing.apiKey;
+    }
+    await env.IRIS_KV.put(CONFIG_KV_KEY, JSON.stringify(newConfig));
+    return jsonResp({
+      saved: true,
+      provider: newConfig.provider,
+      model: newConfig.model,
+      apiKeyConfigured: !!newConfig.apiKey,
+      baseUrl: newConfig.baseUrl,
+      geminiApiUrl: newConfig.geminiApiUrl,
+    });
+  }
+
+  // DELETE /admin/config — remove KV config override (revert to env vars)
+  if (method === 'DELETE' && path === '/admin/config') {
+    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    await env.IRIS_KV.delete(CONFIG_KV_KEY);
+    return jsonResp({ deleted: true, message: 'KV config cleared — using env vars now' });
+  }
+
   return jsonResp({ error: 'Admin route not found', path }, 404);
+}
+
+// =====================================================================
+// KV CONFIG HELPERS
+// =====================================================================
+const CONFIG_KV_KEY = 'config:ai';
+
+async function getKVConfig(env) {
+  if (!env.IRIS_KV) return null;
+  try {
+    return await env.IRIS_KV.get(CONFIG_KV_KEY, 'json');
+  } catch {
+    return null;
+  }
 }
 
 // =====================================================================
