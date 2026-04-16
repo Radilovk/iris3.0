@@ -339,6 +339,7 @@ async function aiCallGemini(env, prompt, imageDataUrl) {
   const model = env.AI_MODEL || 'gemini-2.0-flash';
   const baseUrl = env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta';
 
+  /** @type {Array<{text: any} | {inline_data: {mime_type: any, data: any}}>} */
   const parts = [{ text: prompt }];
 
   if (imageDataUrl) {
