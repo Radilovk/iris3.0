@@ -15,7 +15,7 @@
  *   - 3 calls vs 8 original → 62% fewer API requests while maintaining quality
  *
  * Environment bindings (set in wrangler.toml / Cloudflare dashboard):
- *   IRIS_KV         — KV namespace for caching results
+ *   iris_rag_kv     — KV namespace for caching results
  *   AI_API_KEY      — secret: API key (OpenAI or Google Gemini)
  *   AI_PROVIDER     — var: provider name ("openai", "gemini", "openai-compatible")
  *   AI_MODEL        — var: model name (e.g., "gemini-2.0-flash", "gpt-4o")
@@ -137,7 +137,7 @@ function handleHealthCheck(env) {
     provider,
     model,
     apiKeyConfigured: hasApiKey,
-    kvConfigured: !!env.IRIS_KV,
+    kvConfigured: !!env.iris_rag_kv,
     pipelineSteps: 3,
     pipelineDescription: 'CALL1(vision:detect) → CALL2(vision:verify+map) → CALL3(text:report)',
   });
@@ -172,7 +172,7 @@ async function handleAnalyze(request, env) {
   // Check cache
   let cached = null;
   try {
-    cached = await env.IRIS_KV.get(cacheKey, 'json');
+    cached = await env.iris_rag_kv.get(cacheKey, 'json');
   } catch (kvErr) {
     // KV read failure is non-fatal; proceed to run the pipeline
     console.error('KV get error:', kvErr?.message || kvErr);
@@ -186,14 +186,14 @@ async function handleAnalyze(request, env) {
   const result = await pipeline.run();
 
   // Store in KV with 24-hour TTL (even errors, to avoid hammering AI on bad images)
-  await env.IRIS_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
+  await env.iris_rag_kv.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
 
   return jsonResp({ cached: false, imageHash, side, model: effectiveModel, result });
 }
 
 function createEffectiveEnv(env, aiProvider, aiModel, kvConfig) {
   return {
-    IRIS_KV: env.IRIS_KV,
+    iris_rag_kv: env.iris_rag_kv,
     AI_API_KEY: kvConfig?.apiKey || env.AI_API_KEY,
     AI_BASE_URL: kvConfig?.baseUrl || env.AI_BASE_URL,
     GEMINI_API_URL: kvConfig?.geminiApiUrl || env.GEMINI_API_URL,
@@ -207,7 +207,7 @@ function createEffectiveEnv(env, aiProvider, aiModel, kvConfig) {
 // =====================================================================
 async function handleGetResult(key, env) {
   const cacheKey = `result:${key}`;
-  const result = await env.IRIS_KV.get(cacheKey, 'json').catch(() => null);
+  const result = await env.iris_rag_kv.get(cacheKey, 'json').catch(() => null);
   if (!result) {
     return jsonResp({ error: 'Result not found or expired (24h TTL)' }, 404);
   }
@@ -1021,7 +1021,7 @@ async function handleAdmin(request, env, url) {
       apiKeySource: kvConfig?.apiKey ? 'kv' : (env.AI_API_KEY ? 'env' : 'none'),
       configSource: kvConfig ? 'kv' : 'env',
       adminSecretConfigured: !!env.ADMIN_SECRET,
-      kvConfigured: !!env.IRIS_KV,
+      kvConfigured: !!env.iris_rag_kv,
       aiBaseUrl: kvConfig?.baseUrl || env.AI_BASE_URL || 'https://api.openai.com/v1',
       geminiApiUrl: kvConfig?.geminiApiUrl || env.GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta',
       pipelineSteps: 3,
@@ -1032,46 +1032,46 @@ async function handleAdmin(request, env, url) {
 
   // GET /admin/cache/list?prefix=&cursor= — list KV keys (paginated, max 100)
   if (method === 'GET' && path === '/admin/cache/list') {
-    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    if (!env.iris_rag_kv) return jsonResp({ error: 'KV not configured' }, 503);
     const prefix = url.searchParams.get('prefix') || '';
     const cursor = url.searchParams.get('cursor') || undefined;
     const limit  = Math.min(Number(url.searchParams.get('limit') || 50), 100);
     const listOpts = { prefix, limit };
     if (cursor) listOpts.cursor = cursor;
-    const list = await env.IRIS_KV.list(listOpts).catch(err => ({ error: err?.message }));
+    const list = await env.iris_rag_kv.list(listOpts).catch(err => ({ error: err?.message }));
     return jsonResp(list);
   }
 
   // GET /admin/cache/entry?key= — read one KV entry
   if (method === 'GET' && path === '/admin/cache/entry') {
-    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    if (!env.iris_rag_kv) return jsonResp({ error: 'KV not configured' }, 503);
     const key = url.searchParams.get('key');
     if (!key) return jsonResp({ error: 'key query param required' }, 400);
-    const value = await env.IRIS_KV.get(key, 'json').catch(() => null);
+    const value = await env.iris_rag_kv.get(key, 'json').catch(() => null);
     if (value === null) return jsonResp({ error: 'Entry not found' }, 404);
     return jsonResp({ key, value });
   }
 
   // DELETE /admin/cache/entry?key= — delete one KV entry
   if (method === 'DELETE' && path === '/admin/cache/entry') {
-    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    if (!env.iris_rag_kv) return jsonResp({ error: 'KV not configured' }, 503);
     const key = url.searchParams.get('key');
     if (!key) return jsonResp({ error: 'key query param required' }, 400);
-    await env.IRIS_KV.delete(key).catch(err => { throw err; });
+    await env.iris_rag_kv.delete(key).catch(err => { throw err; });
     return jsonResp({ deleted: true, key });
   }
 
   // DELETE /admin/cache/flush — delete all KV entries (iterative)
   if (method === 'DELETE' && path === '/admin/cache/flush') {
-    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
+    if (!env.iris_rag_kv) return jsonResp({ error: 'KV not configured' }, 503);
     let cursor;
     let total = 0;
     do {
       const opts = { limit: 100 };
       if (cursor) opts.cursor = cursor;
-      const list = await env.IRIS_KV.list(opts);
+      const list = await env.iris_rag_kv.list(opts);
       const keys = list.keys.map(k => k.name);
-      await Promise.all(keys.map(k => env.IRIS_KV.delete(k)));
+      await Promise.all(keys.map(k => env.iris_rag_kv.delete(k)));
       total += keys.length;
       cursor = list.list_complete ? undefined : list.cursor;
     } while (cursor);
@@ -1129,7 +1129,7 @@ async function handleAdmin(request, env, url) {
 
   // POST /admin/config — save AI configuration to KV
   if (method === 'POST' && path === '/admin/config') {
-    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured — cannot store settings' }, 503);
+    if (!env.iris_rag_kv) return jsonResp({ error: 'KV not configured — cannot store settings' }, 503);
     const body = await request.json().catch(() => ({}));
     const existing = await getKVConfig(env) || {};
     const newConfig = {
@@ -1143,7 +1143,7 @@ async function handleAdmin(request, env, url) {
     } else if (existing.apiKey) {
       newConfig.apiKey = existing.apiKey;
     }
-    await env.IRIS_KV.put(CONFIG_KV_KEY, JSON.stringify(newConfig));
+    await env.iris_rag_kv.put(CONFIG_KV_KEY, JSON.stringify(newConfig));
     return jsonResp({
       saved: true,
       provider: newConfig.provider,
@@ -1156,8 +1156,8 @@ async function handleAdmin(request, env, url) {
 
   // DELETE /admin/config — remove KV config override (revert to env vars)
   if (method === 'DELETE' && path === '/admin/config') {
-    if (!env.IRIS_KV) return jsonResp({ error: 'KV not configured' }, 503);
-    await env.IRIS_KV.delete(CONFIG_KV_KEY);
+    if (!env.iris_rag_kv) return jsonResp({ error: 'KV not configured' }, 503);
+    await env.iris_rag_kv.delete(CONFIG_KV_KEY);
     return jsonResp({ deleted: true, message: 'KV config cleared — using env vars now' });
   }
 
@@ -1170,9 +1170,9 @@ async function handleAdmin(request, env, url) {
 const CONFIG_KV_KEY = 'config:ai';
 
 async function getKVConfig(env) {
-  if (!env.IRIS_KV) return null;
+  if (!env.iris_rag_kv) return null;
   try {
-    return await env.IRIS_KV.get(CONFIG_KV_KEY, 'json');
+    return await env.iris_rag_kv.get(CONFIG_KV_KEY, 'json');
   } catch {
     return null;
   }
