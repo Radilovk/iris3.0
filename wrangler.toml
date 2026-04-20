@@ -6,19 +6,12 @@ name            = "iris-analyzer"
 main            = "worker.js"
 compatibility_date = "2024-09-23"
 
-# ─── KV Namespace ───────────────────────────────────────────────────────────────
-# To enable KV (required for saving settings from the admin panel and for caching):
-#   1. Run:  wrangler kv namespace create IRIS_KV
-#   2. Copy the returned 'id' and 'preview_id' into the block below, then uncomment it.
-#   3. Redeploy: wrangler deploy
-#
-# Without KV the worker still functions; AI results won't be cached and settings
-# cannot be saved from the admin panel (use [vars] + wrangler secret put AI_API_KEY).
-#
-# [[kv_namespaces]]
-# binding    = "IRIS_KV"
-# id         = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
-# preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
+# ─── KV Namespace (iris_rag_kv) ──────────────────────────────────────────────────
+# Used for caching AI analysis results and storing admin-panel settings.
+# The binding name IRIS_KV must match what worker.js expects (env.IRIS_KV).
+[[kv_namespaces]]
+binding    = "IRIS_KV"
+id         = "1fd2ab63b3634a1f8f0627c6fde76fd9"
 
 # ─── Environment Variables ───────────────────────────────────────────────────
 [vars]
@@ -68,12 +61,11 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 # 1. Install Wrangler:       npm install -g wrangler
 # 2. Log in:                 wrangler login
 # 3. Set API key secret:     wrangler secret put AI_API_KEY
-# 4. Deploy (no KV needed):  wrangler deploy
+# 4. Deploy:                 wrangler deploy
 #
-# Optional — enable KV for result caching and admin-panel config saving:
-#   a. wrangler kv namespace create IRIS_KV
-#   b. Copy the returned 'id' and 'preview_id' into the [[kv_namespaces]] block above.
-#   c. Uncomment the [[kv_namespaces]] block and redeploy.
+# KV namespace (iris_rag_kv) is already configured above.
+# To create a new one instead:  wrangler kv namespace create IRIS_KV
+# then update the 'id' in [[kv_namespaces]] and redeploy.
 #
 # ─── API Endpoints ───────────────────────────────────────────────────────────────
 #
