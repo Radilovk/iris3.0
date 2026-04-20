@@ -613,7 +613,7 @@
         За да активирате KV:
         <ol>
           <li>Изпълнете: <code>wrangler kv namespace create IRIS_KV</code></li>
-          <li>Копирайте върнатото <code>id</code> и <code>preview_id</code> в <code>wrangler.toml</code> в секцията <code>[[kv_namespaces]]</code></li>
+          <li>Копирайте върнатото <code>id</code> в <code>wrangler.toml</code> в секцията <code>[[kv_namespaces]]</code></li>
           <li>Преразгърнете Worker-а: <code>wrangler deploy</code></li>
         </ol>
         До тогава конфигурирайте AI чрез <code>wrangler.toml</code> [vars] и <code>wrangler secret put AI_API_KEY</code>.
@@ -1227,7 +1227,7 @@ async function saveSettings() {
       resultEl.style.display = '';
       resultEl.style.color = 'var(--danger)';
       if (data.error && data.error.includes('KV not configured')) {
-        resultEl.innerHTML = `⚠️ KV не е конфигуриран. Изпълнете <code>wrangler kv namespace create IRIS_KV</code>, добавете ID-тата в <code>wrangler.toml</code> и преразгърнете с <code>wrangler deploy</code>.`;
+        resultEl.innerHTML = `⚠️ KV не е конфигуриран. Изпълнете <code>wrangler kv namespace create IRIS_KV</code>, добавете ID в <code>wrangler.toml</code> и преразгърнете с <code>wrangler deploy</code>.`;
       } else {
         resultEl.textContent = `Грешка: ${data.error || JSON.stringify(data)}`;
       }

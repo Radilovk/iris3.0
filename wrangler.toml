@@ -12,6 +12,7 @@ compatibility_date = "2024-09-23"
 [[kv_namespaces]]
 binding    = "IRIS_KV"
 id         = "1fd2ab63b3634a1f8f0627c6fde76fd9"
+preview_id = "1fd2ab63b3634a1f8f0627c6fde76fd9"
 
 # ─── Environment Variables ───────────────────────────────────────────────────
 [vars]
