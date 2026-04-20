@@ -137,6 +137,19 @@
       margin-bottom: 18px;
     }
 
+    .kv-warning-banner {
+      display: none;
+      background: rgba(255,193,7,.12);
+      border: 1px solid var(--warning);
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-bottom: 16px;
+      font-size: 0.85rem;
+      line-height: 1.7;
+      color: var(--text);
+    }
+    .kv-warning-banner ol { margin: 8px 0 0 20px; }
+
     .card-header {
       display: flex; align-items: center; justify-content: space-between;
       margin-bottom: 14px;
@@ -595,6 +608,17 @@
     <div class="tab-panel" id="tab-settings">
       <h2 class="section-title">⚙️ Настройки на AI</h2>
 
+      <div id="kvWarningBanner" class="kv-warning-banner">
+        <strong>⚠️ Cloudflare KV не е конфигуриран</strong> — настройките не могат да се запазят.<br>
+        За да активирате KV:
+        <ol>
+          <li>Изпълнете: <code>wrangler kv namespace create IRIS_KV</code></li>
+          <li>Копирайте върнатото <code>id</code> в <code>wrangler.toml</code> в секцията <code>[[kv_namespaces]]</code></li>
+          <li>Преразгърнете Worker-а: <code>wrangler deploy</code></li>
+        </ol>
+        До тогава конфигурирайте AI чрез <code>wrangler.toml</code> [vars] и <code>wrangler secret put AI_API_KEY</code>.
+      </div>
+
       <div class="card" id="settingsStatusCard" style="display:none">
         <div class="card-header">
           <h3>📊 Текуща конфигурация</h3>
@@ -811,6 +835,15 @@ function renderHealth(data, status) {
       ${it.dot ? `<span class="dot ${it.dot}"></span>` : '<span style="width:10px;display:inline-block"></span>'}
       <span class="val">${escHtml(String(it.v))}</span>
     </div>`).join('');
+
+  // Show KV warning and disable save/reset when KV is not available
+  const kvOk = !!data.kvConfigured;
+  const kvBanner = document.getElementById('kvWarningBanner');
+  if (kvBanner) kvBanner.style.display = kvOk ? 'none' : 'block';
+  const saveBtn  = document.getElementById('cfgSaveBtn');
+  const resetBtn = document.getElementById('cfgResetBtn');
+  if (saveBtn)  { saveBtn.disabled  = !kvOk; saveBtn.title  = kvOk ? '' : 'KV не е конфигуриран — вижте предупреждението по-горе'; }
+  if (resetBtn) { resetBtn.disabled = !kvOk; resetBtn.title = kvOk ? 'Изтрий KV настройките и използвай env vars' : 'KV не е конфигуриран'; }
 }
 
 async function quickCachePreview() {
@@ -1193,7 +1226,11 @@ async function saveSettings() {
     } else {
       resultEl.style.display = '';
       resultEl.style.color = 'var(--danger)';
-      resultEl.textContent = `Грешка: ${data.error || JSON.stringify(data)}`;
+      if (data.error && data.error.includes('KV not configured')) {
+        resultEl.innerHTML = `⚠️ KV не е конфигуриран. Изпълнете <code>wrangler kv namespace create IRIS_KV</code>, добавете ID в <code>wrangler.toml</code> и преразгърнете с <code>wrangler deploy</code>.`;
+      } else {
+        resultEl.textContent = `Грешка: ${data.error || JSON.stringify(data)}`;
+      }
     }
   } catch (e) {
     resultEl.style.display = '';

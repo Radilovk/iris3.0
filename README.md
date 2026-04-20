@@ -122,9 +122,10 @@ npm install -g wrangler
 # Вход в Cloudflare
 wrangler login
 
-# Създаване на KV namespace
-wrangler kv namespace create IRIS_KV
-# Копирайте id и preview_id в wrangler.toml
+# Създаване на KV namespace (вече е конфигуриран в wrangler.toml)
+# Ако нямате KV namespace, създайте с:
+# wrangler kv namespace create IRIS_KV
+# и обновете id в wrangler.toml
 
 # Задаване на API ключ
 wrangler secret put AI_API_KEY
