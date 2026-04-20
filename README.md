@@ -124,7 +124,7 @@ wrangler login
 
 # Създаване на KV namespace (вече е конфигуриран в wrangler.toml)
 # Ако нямате KV namespace, създайте с:
-# wrangler kv namespace create IRIS_KV
+# wrangler kv namespace create iris_rag_kv
 # и обновете id в wrangler.toml
 
 # Задаване на API ключ

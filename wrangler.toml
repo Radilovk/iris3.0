@@ -8,9 +8,9 @@ compatibility_date = "2024-09-23"
 
 # ─── KV Namespace (iris_rag_kv) ──────────────────────────────────────────────────
 # Used for caching AI analysis results and storing admin-panel settings.
-# The binding name IRIS_KV must match what worker.js expects (env.IRIS_KV).
+# The binding name iris_rag_kv must match what worker.js expects (env.iris_rag_kv).
 [[kv_namespaces]]
-binding    = "IRIS_KV"
+binding    = "iris_rag_kv"
 id         = "1fd2ab63b3634a1f8f0627c6fde76fd9"
 preview_id = "1fd2ab63b3634a1f8f0627c6fde76fd9"
 
@@ -65,7 +65,7 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 # 4. Deploy:                 wrangler deploy
 #
 # KV namespace (iris_rag_kv) is already configured above.
-# To create a new one instead:  wrangler kv namespace create IRIS_KV
+# To create a new one instead:  wrangler kv namespace create iris_rag_kv
 # then update the 'id' in [[kv_namespaces]] and redeploy.
 #
 # ─── API Endpoints ───────────────────────────────────────────────────────────────
