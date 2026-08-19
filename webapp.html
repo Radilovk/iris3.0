@@ -221,11 +221,12 @@ h3 { font-size: 1rem; margin-bottom: 12px; font-weight: 620; display: flex; alig
 .callout li { margin: 3px 0; }
 
 /* iris map */
-.map-wrap { display: grid; grid-template-columns: 1fr 260px; gap: 20px; align-items: center; }
-@media (max-width: 700px) { .map-wrap { grid-template-columns: 1fr; } }
-#irisMap { width: 100%; max-width: 340px; margin: 0 auto; display: block; }
-#irisMap path { cursor: pointer; transition: opacity .2s, transform .2s; transform-origin: 50% 50%; }
-#irisMap path:hover { opacity: .82; }
+.eye-maps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+.eye-map { text-align: center; }
+.eye-map h4 { font-size: .82rem; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; }
+.irisMap { width: 100%; max-width: 300px; margin: 0 auto; display: block; }
+.irisMap path { cursor: pointer; transition: opacity .2s; }
+.irisMap path:hover { opacity: .82; }
 .zone-detail { font-size: .86rem; min-height: 92px; }
 .zone-detail h4 { font-size: .95rem; margin-bottom: 4px; }
 .zone-detail .st { font-size: .76rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
@@ -348,6 +349,16 @@ h3 { font-size: 1rem; margin-bottom: 12px; font-weight: 620; display: flex; alig
           <img class="eye-thumb hidden" id="thumbL" alt="Ляво око">
           <div class="eye-foot hidden" id="footL"></div>
         </div>
+      </div>
+
+      <div class="callout info" style="margin-top:16px">
+        <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+          <input type="checkbox" id="mirrored" checked style="margin-top:3px;width:auto">
+          <span>Снимките са направени със <b>селфи (предна) камера</b>.<br>
+            <span class="muted">Предната камера обръща кадъра огледално. Ако снимките са правени
+            от друг човек със задната камера, махнете отметката — иначе лявата и дясната страна
+            на картата се разменят.</span></span>
+        </label>
       </div>
 
       <div class="tips">
@@ -569,6 +580,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('aiModel').value = cfg.model || '';
   } catch (e) { /* ignore malformed saved config */ }
 
+  document.getElementById('mirrored').addEventListener('change', () => {
+    // The convention changes the strip itself, so anything already processed
+    // has to be re-taken rather than silently reinterpreted.
+    if (eyes.R || eyes.L) {
+      resetEye('R'); resetEye('L');
+      alert('Настройката за огледални снимки е променена. Изберете снимките отново.');
+    }
+  });
+
   QUESTIONNAIRE_FIELDS.forEach(f => {
     const el = document.getElementById(f.id);
     if (el) el.addEventListener('input', updateMeter);
@@ -629,7 +649,8 @@ async function onPick(side, input) {
   let mat = null;
   try {
     mat = await loadMatFromDataUrl(dataUrl);
-    const res = IrisGeometry.analyzeEye(mat, side, document.getElementById('stripCanvas'));
+    const mirrored = document.getElementById('mirrored').checked;
+    const res = IrisGeometry.analyzeEye(mat, side, document.getElementById('stripCanvas'), mirrored);
     if (res.ok) {
       eyes[side] = {
         strip: res.strip.toDataURL('image/jpeg', 0.92).split(',')[1],
@@ -804,24 +825,23 @@ async function startAnalysis() {
     return;
   }
 
-  // Prefer the eye with the better capture; both are sent if available.
   const sides = ['R', 'L'].filter(s => eyes[s]);
-  const results = [];
 
   try {
     setStage(1);
-    for (const side of sides) {
-      const r = await callWorker(workerUrl, side, eyes[side], questionnaire);
-      if (r && r.error) throw new Error(typeof r.error === 'string' ? r.error : (r.error.message || 'Грешка от анализа'));
-      setStage(2);
-      results.push({ side, payload: r });
+    // Both eyes go in one request: they are read together, not averaged, and
+    // several zones exist in only one eye.
+    const result = await callWorker(workerUrl, sides, questionnaire);
+    if (result && result.error) {
+      throw new Error(typeof result.error === 'string' ? result.error : (result.error.message || 'Грешка от анализа'));
     }
+    setStage(2);
     setStage(3);
     await new Promise(r => setTimeout(r, 250));
 
-    lastResult = pickPrimary(results);
-    if (!lastResult) throw new Error('Анализът не върна резултат.');
-    renderResult(lastResult, results);
+    if (!result || !result.analysis) throw new Error('Анализът не върна резултат.');
+    lastResult = result;
+    renderResult(result, sides);
     goStep(4);
   } catch (err) {
     document.getElementById('analyzeErr').innerHTML =
@@ -831,19 +851,24 @@ async function startAnalysis() {
   }
 }
 
-async function callWorker(workerUrl, side, eye, questionnaire) {
+async function callWorker(workerUrl, sides, questionnaire) {
   const fd = new FormData();
-  fd.append('strip_image', eye.strip);
-  fd.append('side', side);
 
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(eye.strip));
+  let hashSource = '';
+  for (const side of sides) {
+    const key = side.toLowerCase();
+    fd.append(`strip_image_${key}`, eyes[side].strip);
+    // Let the report know how much each capture can actually support.
+    fd.append(`capture_quality_${key}`, JSON.stringify(eyes[side].quality));
+    hashSource += eyes[side].strip;
+  }
+
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(hashSource));
   fd.append('image_hash', Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 12));
 
   if (questionnaire && Object.keys(questionnaire).length) {
     fd.append('questionnaire', JSON.stringify(questionnaire));
   }
-  // Let the report know how much the capture can actually support.
-  fd.append('capture_quality', JSON.stringify(eye.quality));
 
   try {
     const cfg = JSON.parse(localStorage.getItem('irisModelConfig') || '{}');
@@ -855,14 +880,6 @@ async function callWorker(workerUrl, side, eye, questionnaire) {
   if (!resp.ok) throw new Error('Сървърът върна грешка ' + resp.status);
   const data = await resp.json();
   return data.result || data;
-}
-
-function pickPrimary(results) {
-  const usable = results.filter(r => r.payload && r.payload.analysis);
-  if (!usable.length) return null;
-  // Prefer the eye whose capture scored higher.
-  usable.sort((a, b) => (eyes[b.side].quality.score - eyes[a.side].quality.score));
-  return usable[0].payload;
 }
 
 function restart() {
@@ -881,7 +898,7 @@ function escapeHtml(s) {
 }
 const arr = v => Array.isArray(v) ? v : [];
 
-function renderResult(res, allResults) {
+function renderResult(res, sides) {
   const root = document.getElementById('resultRoot');
   const a = res.analysis || {};
   const plan = res.nutritionPlan || {};
@@ -889,9 +906,9 @@ function renderResult(res, allResults) {
   let html = '';
 
   // ---- honest quality strip
-  const capBadges = allResults.map(r => {
-    const q = eyes[r.side].quality;
-    return `<span class="qbadge">${r.side === 'R' ? 'Дясно' : 'Ляво'} око: <b>${q.score}/100</b>${q.rollCorrected ? '' : ' · без ъглова референция'}</span>`;
+  const capBadges = sides.map(side => {
+    const q = eyes[side].quality;
+    return `<span class="qbadge">${side === 'R' ? 'Дясно' : 'Ляво'} око: <b>${q.score}/100</b>${q.rollCorrected ? '' : ' · без ъглова референция'}</span>`;
   }).join('');
   html += `<div class="quality-strip">${capBadges}
     ${dq.irisContribution ? `<span class="qbadge">Принос на ириса: <b>${escapeHtml(dq.irisContribution)}</b></span>` : ''}
@@ -941,16 +958,28 @@ function renderResult(res, allResults) {
     html += '</div>';
   }
 
-  // ---- iris map
-  if (arr(a.zones).length) {
+  // ---- iris map, one per eye: the two eyes read different sides of the body,
+  //      so they are shown side by side rather than merged into one figure.
+  const eyeMaps = arr(a.eyes).filter(e => arr(e.zones).length);
+  if (eyeMaps.length) {
     html += `<div class="card">
       <h3>Ирисова карта</h3>
-      <div class="map-wrap">
-        <div>${buildIrisMap(a.zones, a.overallHealth)}</div>
-        <div class="zone-detail" id="zoneDetail">
-          <h4>Докоснете сектор</h4>
-          <p class="muted">Всеки сектор отговаря на част от ириса. Цветът показва колко находки има там.</p>
-        </div>
+      ${Number.isFinite(a.findingsIndex)
+        ? `<p class="muted" style="margin:-6px 0 14px">Индекс на находките: <b style="color:var(--text)">${a.findingsIndex}</b>
+           — колко показва ирисът, не оценка на здравето.</p>` : ''}
+      <div class="eye-maps">` +
+      eyeMaps.map((e, idx) => `
+        <div class="eye-map">
+          <h4>${e.side === 'R' ? 'Дясно око' : 'Ляво око'}</h4>
+          ${buildIrisMap(e.zones, e.side === 'R' ? 'дясно' : 'ляво', idx)}
+          ${e.collarette && e.collarette.note
+            ? `<p class="muted" style="margin-top:8px">Автономен венец: ${escapeHtml(e.collarette.status || '')} · ${escapeHtml(e.collarette.note)}</p>`
+            : ''}
+        </div>`).join('') +
+      `</div>
+      <div class="zone-detail" id="zoneDetail" style="margin-top:14px">
+        <h4>Докоснете сектор</h4>
+        <p class="muted">Всеки сектор отговаря на част от ириса. Цветът показва колко находки има там.</p>
       </div>
       <div class="legend">
         <span><i style="background:${STATUS_COLOR.normal}"></i>спокойна</span>
@@ -973,16 +1002,20 @@ function renderResult(res, allResults) {
       }).join('') + '</div></div>';
   }
 
-  // ---- findings
-  if (arr(a.artifacts).length) {
+  // ---- findings, labelled by eye
+  const withArtifacts = arr(a.eyes).filter(e => arr(e.artifacts).length);
+  if (withArtifacts.length) {
     html += `<div class="card"><h3>Основни находки</h3>` +
-      a.artifacts.map(f => `
-        <div class="finding">
-          <span class="sev" style="background:${f.severity === 'high' ? STATUS_COLOR.concern : f.severity === 'medium' ? STATUS_COLOR.attention : STATUS_COLOR.normal}"></span>
-          <div><b>${escapeHtml(f.type)}</b>
-            <span class="loc"> · ${escapeHtml(f.location || '')}</span>
-            <div class="muted">${escapeHtml(f.description || '')}</div></div>
-        </div>`).join('') + '</div>';
+      withArtifacts.map(e => `
+        <h4 style="font-size:.85rem;color:var(--text-dim);margin:10px 0 4px">
+          ${e.side === 'R' ? 'Дясно око' : 'Ляво око'}</h4>` +
+        e.artifacts.map(f => `
+          <div class="finding">
+            <span class="sev" style="background:${f.severity === 'high' ? STATUS_COLOR.concern : f.severity === 'medium' ? STATUS_COLOR.attention : STATUS_COLOR.normal}"></span>
+            <div><b>${escapeHtml(f.type)}</b>
+              <span class="loc"> · ${escapeHtml(f.location || '')}</span>
+              <div class="muted">${escapeHtml(f.description || '')}</div></div>
+          </div>`).join('')).join('') + '</div>';
   }
 
   // ---- priorities & lifestyle
@@ -1012,12 +1045,12 @@ function renderResult(res, allResults) {
   document.getElementById('disclaimerTxt').textContent = res.disclaimer ||
     'Този анализ не е медицинска диагноза. Ориентировъчен уелнес инструмент за изготвяне на хранителен план. При реални оплаквания се консултирайте с лекар.';
 
-  if (arr(a.zones).length) wireZoneClicks(a.zones);
+  arr(a.eyes).forEach((e, idx) => wireZoneClicks(e.zones, idx, e.side));
   animateBars();
 }
 
 /** Donut of the 12 clock sectors, coloured by status. */
-function buildIrisMap(zones, overall) {
+function buildIrisMap(zones, label, idx) {
   const cx = 150, cy = 150, rOut = 132, rIn = 74;
   const seg = (2 * Math.PI) / 12;
   const paths = zones.slice(0, 12).map((z, i) => {
@@ -1039,24 +1072,24 @@ function buildIrisMap(zones, overall) {
       text-anchor="middle" font-size="10" fill="#0a0f14" font-weight="700" pointer-events="none">${i + 1}</text>`;
   }).join('');
 
-  const score = Number.isFinite(overall) ? overall : '';
-  return `<svg id="irisMap" viewBox="0 0 300 300">
+  // No score in the middle: the index is one shared number, and repeating it in
+  // each eye read as a per-eye health verdict, which it is not.
+  return `<svg class="irisMap" data-map="${idx}" viewBox="0 0 300 300">
     <circle cx="${cx}" cy="${cy}" r="${rOut + 6}" fill="none" stroke="#24323e" stroke-width="1"/>
     ${paths}${labels}
     <circle cx="${cx}" cy="${cy}" r="${rIn - 8}" fill="#0d141b" stroke="#24323e"/>
-    <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="30" font-weight="700" fill="#e8eef4">${score}</text>
-    <text x="${cx}" y="${cy + 17}" text-anchor="middle" font-size="10" fill="#64788a">общ индекс</text>
+    <text x="${cx}" y="${cy + 5}" text-anchor="middle" font-size="13" fill="#64788a">${label}</text>
   </svg>`;
 }
 
-function wireZoneClicks(zones) {
-  document.querySelectorAll('#irisMap path').forEach(p => {
+function wireZoneClicks(zones, idx, side) {
+  document.querySelectorAll(`.irisMap[data-map="${idx}"] path`).forEach(p => {
     p.addEventListener('click', () => {
       const z = zones[Number(p.dataset.zone)];
       if (!z) return;
       const color = STATUS_COLOR[z.status] || STATUS_COLOR.normal;
       document.getElementById('zoneDetail').innerHTML = `
-        <h4>Сектор ${z.id} · ${escapeHtml(z.name || '')}</h4>
+        <h4>${side === 'R' ? 'Дясно' : 'Ляво'} око · сектор ${z.id} · ${escapeHtml(z.name || '')}</h4>
         <div class="st" style="color:${color}">${STATUS_LABEL[z.status] || z.status}</div>
         <p style="margin-top:6px"><b>${escapeHtml(z.organ || '')}</b></p>
         <p class="muted">${escapeHtml(z.findings || 'Без значими находки.')}</p>`;

@@ -148,28 +148,47 @@ function handleHealthCheck(env) {
 // =====================================================================
 async function handleAnalyze(request, env) {
   const form = await request.formData();
-  const side         = (form.get('side') || 'R').toUpperCase();
-  const stripB64     = form.get('strip_image');
   const imageHash    = form.get('image_hash') || genId();
   const qRaw         = form.get('questionnaire');
   const questionnaire = qRaw ? safeParseJSON(qRaw) : {};
-  const cqRaw        = form.get('capture_quality');
-  const captureQuality = cqRaw ? safeParseJSON(cqRaw) : null;
 
   const aiProvider   = form.get('ai_provider') || null;
   const aiModel      = form.get('ai_model') || null;
 
-  if (!stripB64) {
-    return jsonResp({ error: 'strip_image is required (base64 JPEG of the unwrapped iris strip)' }, 400);
+  // Both eyes belong in one report. Iridology reads the right eye for the right
+  // side of the body and the left for the left, and several zones in the map
+  // exist in only one eye — liver on the right, heart on the left — so analysing
+  // the eyes separately and keeping the "better" one silently threw away the
+  // only view of whole organs. Single-eye submissions are still accepted.
+  const eyes = [];
+  for (const side of ['R', 'L']) {
+    const strip = form.get(`strip_image_${side.toLowerCase()}`);
+    if (!strip) continue;
+    const cq = form.get(`capture_quality_${side.toLowerCase()}`);
+    eyes.push({ side, stripB64: strip, quality: cq ? safeParseJSON(cq) : null });
   }
-  if (side !== 'R' && side !== 'L') {
-    return jsonResp({ error: 'side must be "R" or "L"' }, 400);
+  if (!eyes.length) {
+    const strip = form.get('strip_image');
+    const side = (form.get('side') || 'R').toUpperCase();
+    if (strip) {
+      if (side !== 'R' && side !== 'L') {
+        return jsonResp({ error: 'side must be "R" or "L"' }, 400);
+      }
+      const cq = form.get('capture_quality');
+      eyes.push({ side, stripB64: strip, quality: cq ? safeParseJSON(cq) : null });
+    }
+  }
+  if (!eyes.length) {
+    return jsonResp({
+      error: 'strip_image_r and/or strip_image_l are required (base64 JPEG of the unwrapped iris strip)',
+    }, 400);
   }
 
   const kvConfig = await getKVConfig(env);
   const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel, kvConfig);
   const effectiveModel = effectiveEnv.AI_MODEL;
-  const cacheKey = `result:${side}:${imageHash}:${effectiveModel}`;
+  const sides = eyes.map(e => e.side).join('');
+  const cacheKey = `result:${sides}:${imageHash}:${effectiveModel}`;
 
   // Check cache
   let cached = null;
@@ -180,17 +199,16 @@ async function handleAnalyze(request, env) {
     console.error('KV get error:', kvErr?.message || kvErr);
   }
   if (cached) {
-    return jsonResp({ cached: true, imageHash, side, model: effectiveModel, result: cached });
+    return jsonResp({ cached: true, imageHash, sides, model: effectiveModel, result: cached });
   }
 
-  // Run 3-call pipeline
-  const pipeline = new IrisPipeline(effectiveEnv, stripB64, side, imageHash, questionnaire, captureQuality);
+  const pipeline = new IrisPipeline(effectiveEnv, eyes, imageHash, questionnaire);
   const result = await pipeline.run();
 
   // Store in KV with 24-hour TTL (even errors, to avoid hammering AI on bad images)
   await env.iris_rag_kv.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
 
-  return jsonResp({ cached: false, imageHash, side, model: effectiveModel, result });
+  return jsonResp({ cached: false, imageHash, sides, model: effectiveModel, result });
 }
 
 function createEffectiveEnv(env, aiProvider, aiModel, kvConfig) {
@@ -220,61 +238,73 @@ async function handleGetResult(key, env) {
 // 3-CALL PIPELINE CLASS
 // =====================================================================
 class IrisPipeline {
-  constructor(env, stripB64, side, imageHash, questionnaire, captureQuality) {
-    this.env          = env;
-    this.imageB64     = stripB64;
-    this.imageDataUrl = `data:image/jpeg;base64,${stripB64}`;
-    this.side         = side;
-    this.imageHash    = imageHash;
+  /** eyes: [{ side: 'R'|'L', stripB64, quality }] — one or both. */
+  constructor(env, eyes, imageHash, questionnaire) {
+    this.env = env;
+    this.eyes = eyes.map(e => ({
+      ...e,
+      dataUrl: `data:image/jpeg;base64,${e.stripB64}`,
+    }));
+    this.imageHash = imageHash;
     this.questionnaire = questionnaire;
-    // How good the capture actually was, measured by the client geometry stage.
-    this.captureQuality = captureQuality || null;
   }
 
   async run() {
-    // ── CALL 1: Full Detection (vision + image) ──────────────────────
-    // Geo calibration + structural + pigment + ANW collarette — all in one vision call
-    let call1 = await this.visionCall(promptCall1_Detect(this.side, this.imageHash));
-    if (call1.error) {
-      return { error: call1.error || call1, stage: 'CALL1_DETECT', imageHash: this.imageHash, side: this.side };
+    // Detection and verification run per eye; the report is written once, over
+    // both, because a plan built from half the evidence is not a better plan.
+    const analysed = [];
+    for (const eye of this.eyes) {
+      const detected = await this.detectEye(eye);
+      if (detected.error) {
+        return { error: detected.error, stage: detected.stage, imageHash: this.imageHash, side: eye.side };
+      }
+      analysed.push(detected);
     }
+
+    // ── CALL 3: Report Generation (text only — no image needed) ──────
+    const call3 = await this.textCall(
+      promptCall3_Report(this.imageHash, analysed, this.questionnaire)
+    );
+
+    return {
+      imageHash: this.imageHash,
+      sides: analysed.map(a => a.side),
+      ...call3,
+      // Raw pipeline steps kept for debugging.
+      pipeline: {
+        ...(call3.pipeline || {}),
+        _eyes: analysed.map(a => ({ side: a.side, call1: a.call1, call2: a.call2 })),
+      },
+    };
+  }
+
+  /** CALL1 + CALL2 for a single eye, with coordinates and organs resolved in code. */
+  async detectEye(eye) {
+    // ── CALL 1: Full Detection (vision + image) ──────────────────────
+    // Quality + structural + pigment + ANW collarette — all in one vision call
+    let call1 = await this.visionCall(promptCall1_Detect(eye.side, this.imageHash), eye.dataUrl);
+    if (call1.error) return { error: call1.error || call1, stage: 'CALL1_DETECT' };
+
     // The model only ever reads sector/ringGroup labels off the image; the
     // numeric minuteRange/ringRange used for zone matching is computed here,
     // deterministically, instead of trusting the model's own arithmetic.
     call1 = postProcessDetection(call1);
 
-    // ── CALL 2: Verification & Zone Mapping (vision + image) ─────────
-    // Re-examine image with CALL1's findings: validate, refine, consistency check, zone mapping
-    let call2 = await this.visionCall(promptCall2_Verify(this.side, this.imageHash, call1));
-    if (call2.error) {
-      return { error: call2.error || call2, stage: 'CALL2_VERIFY', imageHash: this.imageHash, side: this.side };
-    }
+    // ── CALL 2: Verification (vision + image) ────────────────────────
+    // Re-examine the image against CALL1: confirm, correct, reject false positives
+    let call2 = await this.visionCall(promptCall2_Verify(eye.side, this.imageHash, call1), eye.dataUrl);
+    if (call2.error) return { error: call2.error || call2, stage: 'CALL2_VERIFY' };
+
     call2 = postProcessDetection(call2);
     // Organ attribution happens here, in code, from the labels the model read —
     // never by asking the model to re-derive coordinates.
-    call2 = attachZones(call2, this.side);
+    call2 = attachZones(call2, eye.side);
 
-    // ── CALL 3: Report Generation (text only — no image needed) ──────
-    // Synthesize verified findings into Bulgarian UI format with advice
-    const call3 = await this.textCall(
-      promptCall3_Report(this.side, this.imageHash, call1, call2, this.questionnaire, this.captureQuality)
-    );
-
-    return {
-      imageHash: this.imageHash,
-      side: this.side,
-      ...call3,
-      // Merge raw pipeline steps into call3's pipeline for debugging
-      pipeline: {
-        ...(call3.pipeline || {}),
-        _call1: call1,
-        _call2: call2,
-      },
-    };
+    return { side: eye.side, quality: eye.quality || null, call1, call2 };
   }
 
-  async visionCall(prompt) {
-    return aiCall(this.env, prompt, this.imageDataUrl);
+  async visionCall(prompt, dataUrl) {
+    return aiCall(this.env, prompt, dataUrl);
   }
 
   async textCall(prompt) {
@@ -1048,25 +1078,37 @@ FAILSAFE:
 // CALL 3: REPORT GENERATION (text only — no image)
 // Combines: STEP5 Bulgarian report
 // =====================================================================
-function promptCall3_Report(side, imageHash, call1, call2, questionnaire, captureQuality) {
+function promptCall3_Report(imageHash, analysed, questionnaire) {
   const q = questionnaire || {};
-  return `IRIS PIPELINE — CALL3: Bulgarian Report Generation (v11)
+  const eyesPayload = analysed.map(a => ({
+    side: a.side,
+    captureQuality: a.quality || {},
+    verified: a.call2,
+  }));
+  const sideList = analysed.map(a => (a.side === 'R' ? 'дясно' : 'ляво')).join(' и ');
 
-ROLE: iris_frontend_report_generator_bg_v11
+  return `IRIS PIPELINE — CALL3: Bulgarian Report Generation (v12)
+
+ROLE: iris_frontend_report_generator_bg_v12
 MODE: strict_json_only (NO image — text synthesis only)
 
 INPUTS:
-  DETECTION = ${JSON.stringify(call1)}
-  VERIFIED  = ${JSON.stringify(call2)}
+  EYES = ${JSON.stringify(eyesPayload)}
   QUESTIONNAIRE = ${JSON.stringify(q)}
-  CAPTURE_QUALITY = ${JSON.stringify(captureQuality || {})}
-  SIDE = ${side}
   IMG_ID = ${imageHash}
 
-PREREQ: If VERIFIED.error exists → return error JSON.
+You are writing ONE report covering ${analysed.length === 2 ? 'BOTH eyes' : `the ${sideList} eye only`}.
 
-You have VERIFIED detection results (CALL2 output). Synthesize them into the
-final Bulgarian-language UI report. This is a TEXT-ONLY call — no image analysis.
+PREREQ: If every entry in EYES contains an error → return error JSON.
+
+BOTH EYES, ONE REPORT:
+- In this method the right eye reads the right side of the body and the left eye
+  the left, and several zones exist in only one eye. So do NOT average the eyes
+  together and do NOT prefer one: report each eye's zones separately, and let the
+  combined evidence inform the single shared nutrition plan and system scores.
+- If only one eye is present, say so in dataQuality.limitations.
+- Each eye carries its own captureQuality; weight a poorly captured eye less and
+  say so rather than treating both as equally reliable.
 
 ================================================================================
 NOT MEDICAL — MANDATORY FRAMING:
@@ -1107,15 +1149,15 @@ AMBIGUITY IS EXPLICIT — RESPECT IT:
   label; a specific organ is allowed only when evidence is strong (confidence
   >= 0.75).
 
-CAPTURE QUALITY GOVERNS CONFIDENCE:
-- CAPTURE_QUALITY carries how good the photo actually was (score 0-100,
-  visibleFraction, and rollCorrected — whether an anatomical rotation reference
-  could be established from the eye corners).
-- If rollCorrected is false, the angular position of every finding may be off by
-  up to a sector. In that case: prefer system labels over organ names throughout,
-  and say so in dataQuality.
-- If score < 55 or visibleFraction < 0.7, keep zone statuses conservative
-  (avoid "concern" unless the questionnaire independently supports it).
+CAPTURE QUALITY GOVERNS CONFIDENCE (per eye):
+- Each eye's captureQuality carries how good that photo actually was (score
+  0-100, visibleFraction, and rollCorrected — whether an anatomical rotation
+  reference could be established from the eye corners).
+- If rollCorrected is false for an eye, the angular position of every finding in
+  THAT eye may be off by up to a sector. For that eye: prefer system labels over
+  organ names throughout, and say so in dataQuality.
+- If an eye's score < 55 or visibleFraction < 0.7, keep its zone statuses
+  conservative (avoid "concern" unless the questionnaire independently supports it).
 
 VALIDATION PRIORITY (cross-reference with QUESTIONNAIRE):
   1) ВИСОК — потвърдено от въпросника (highest weight)
@@ -1136,23 +1178,20 @@ MINUTE-TO-ZONE CONVERSION:
   Zone 11 ("10-11ч"): minutes 50-55  → degrees 300-330
   Zone 12 ("11-12ч"): minutes 55-60  → degrees 330-360
 
-HOW TO FILL EACH ZONE:
-- Collect VERIFIED findings whose center minute falls in the zone's range.
+HOW TO FILL EACH ZONE (do this once PER EYE, using only that eye's findings):
+- Collect that eye's verified findings whose center minute falls in the zone range.
 - Determine dominant organ/system by: weight = confidence + severity_bonus(lacuna=+0.1, crypt=+0.15, cleft=+0.15)
 - status: concern (strong evidence + HIGH questionnaire) | attention (medium evidence) | normal (little/no evidence)
 - findings: brief Bulgarian summary ≤ 60 chars
 
-ARTIFACTS (2-5 strongest from VERIFIED):
+ARTIFACTS (2-5 strongest per eye):
   Prioritize: lacuna, crypt, radial_furrow, deep_radial_cleft, nerve_rings,
               pigment_spot, sodium_ring, scurf_rim, lymphatic_rosary, ANW defects
   location format: clock string (minute 0→"12:00", 5→"1:00", 10→"2:00", 15→"3:00", etc.)
 
-COLLARETTE PROFILE (from VERIFIED.collarette_verified + VERIFIED.profile.ANW_profile):
-  - status: Bulgarian label
-  - integrity: Bulgarian
-  - 12 segments with shape/position in Bulgarian
-  - defects with clock location
-  - clinicalNote ≤ 120 chars Bulgarian
+COLLARETTE (per eye, from that eye's collarette_verified + profile.ANW_profile):
+  - status and integrity as short Bulgarian labels
+  - note ≤ 120 chars Bulgarian
 
 SYSTEM SCORES (always exactly 6):
   Храносмилателна | Имунна | Нервна | Сърдечно-съдова | Детоксикация | Ендокринна
@@ -1202,35 +1241,34 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
 {
   "disclaimer": "Този анализ не е медицинска диагноза - ориентировъчно, уелнес приложение с цел хранителен план. При реални оплаквания се консултирайте с лекар.",
   "analysis": {
-    "zones": [
-      {"id":1,"name":"12-1ч","organ":"<БГ>","status":"normal|attention|concern","findings":"<=60 БГ","angle":[0,30]},
-      {"id":2,"name":"1-2ч","organ":"...","status":"...","findings":"<=60","angle":[30,60]},
-      {"id":3,"name":"2-3ч","organ":"...","status":"...","findings":"<=60","angle":[60,90]},
-      {"id":4,"name":"3-4ч","organ":"...","status":"...","findings":"<=60","angle":[90,120]},
-      {"id":5,"name":"4-5ч","organ":"...","status":"...","findings":"<=60","angle":[120,150]},
-      {"id":6,"name":"5-6ч","organ":"...","status":"...","findings":"<=60","angle":[150,180]},
-      {"id":7,"name":"6-7ч","organ":"...","status":"...","findings":"<=60","angle":[180,210]},
-      {"id":8,"name":"7-8ч","organ":"...","status":"...","findings":"<=60","angle":[210,240]},
-      {"id":9,"name":"8-9ч","organ":"...","status":"...","findings":"<=60","angle":[240,270]},
-      {"id":10,"name":"9-10ч","organ":"...","status":"...","findings":"<=60","angle":[270,300]},
-      {"id":11,"name":"10-11ч","organ":"...","status":"...","findings":"<=60","angle":[300,330]},
-      {"id":12,"name":"11-12ч","organ":"...","status":"...","findings":"<=60","angle":[330,360]}
+    "eyes": [
+      {
+        "side": "R",
+        "zones": [
+          {"id":1,"name":"12-1ч","organ":"<БГ>","status":"normal|attention|concern","findings":"<=60 БГ","angle":[0,30]},
+          {"id":2,"name":"1-2ч","organ":"...","status":"...","findings":"<=60","angle":[30,60]},
+          {"id":3,"name":"2-3ч","organ":"...","status":"...","findings":"<=60","angle":[60,90]},
+          {"id":4,"name":"3-4ч","organ":"...","status":"...","findings":"<=60","angle":[90,120]},
+          {"id":5,"name":"4-5ч","organ":"...","status":"...","findings":"<=60","angle":[120,150]},
+          {"id":6,"name":"5-6ч","organ":"...","status":"...","findings":"<=60","angle":[150,180]},
+          {"id":7,"name":"6-7ч","organ":"...","status":"...","findings":"<=60","angle":[180,210]},
+          {"id":8,"name":"7-8ч","organ":"...","status":"...","findings":"<=60","angle":[210,240]},
+          {"id":9,"name":"8-9ч","organ":"...","status":"...","findings":"<=60","angle":[240,270]},
+          {"id":10,"name":"9-10ч","organ":"...","status":"...","findings":"<=60","angle":[270,300]},
+          {"id":11,"name":"10-11ч","organ":"...","status":"...","findings":"<=60","angle":[300,330]},
+          {"id":12,"name":"11-12ч","organ":"...","status":"...","findings":"<=60","angle":[330,360]}
+        ],
+        "artifacts": [
+          {"type":"тип_БГ","location":"3:00-4:00","description":"<=60 БГ","severity":"low|medium|high"}
+        ],
+        "collarette": {
+          "status": "разширена|свита|прекъсната|нормална|смесена|неясна",
+          "integrity": "добра|умерена|слаба",
+          "note": "<=120 chars кратка интерпретация"
+        }
+      }
     ],
-    "artifacts": [
-      {"type":"тип_БГ","location":"3:00-4:00","description":"<=60 БГ","severity":"low|medium|high"}
-    ],
-    "collaretteProfile": {
-      "status": "разширена|свита|прекъсната|нормална|смесена|неясна",
-      "integrity": "добра|умерена|слаба",
-      "segments": [
-        {"seg":1,"clock":"12-1ч","shape":"нормална|разширена|свита|прекъсната|вдлъбната|балониране|заличена","position":"висока|средна|ниска","visible":true}
-      ],
-      "defects": [
-        {"type":"прекъсване|вдлъбнатина|балониране|лезия","location":"3:00-4:00","description":"<=60"}
-      ],
-      "clinicalNote": "<=120 chars кратка интерпретация"
-    },
-    "overallHealth": 75,
+    "findingsIndex": 75,
     "systemScores": [
       {"system":"Храносмилателна","score":80,"description":"<=60"},
       {"system":"Имунна","score":80,"description":"<=60"},
@@ -1263,23 +1301,8 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
     "followUp": ["<=120"]
   },
   "pipeline": {
-    "quality": {
-      "score0_100": 0,
-      "focus": "good|med|poor",
-      "glare": "none|low|med|high",
-      "occlusion": "none|low|med|high"
-    },
-    "global": {
-      "constitution": "LYM|HEM|BIL|unclear",
-      "disposition": "SILK|LINEN|BURLAP|unclear",
-      "diathesis": [{"code":"HAC|LRS|LIP|DYS","confidence":0.0}],
-      "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
-    },
-    "structuralFindings": [
-      {"fid":"S1","type":"...","sectorRange":[0,0],"ringGroup":"...","size":"xs|s|m|l","zone":"zone_id","organ_bg":"...","ambiguous":false,"confidence":0.0}
-    ],
-    "pigmentFindings": [
-      {"fid":"P1","type":"...","subtype":"...","sectorRange":[0,0],"ringGroup":"...","severity":"low|medium|high","zone":"zone_id","organ_bg":"...","ambiguous":false,"confidence":0.0}
+    "global": [
+      {"side":"R","constitution":"LYM|HEM|BIL|unclear","disposition":"SILK|LINEN|BURLAP|unclear","ANW_status":"expanded|contracted|broken|normal|mixed|unclear"}
     ]
   }
 }
@@ -1290,9 +1313,12 @@ RULES:
 - No double quotes inside string values
 - findings ≤ 60 chars, descriptions ≤ 60 chars, advice ≤ 120 chars
 - severity: low|medium|high
-- Always output exactly 12 zones, exactly 6 systemScores
-- 2-5 artifacts (strongest findings)
-- organ names MUST come from the zone MAP
+- One entry in "analysis.eyes" per eye present in EYES, each with exactly 12 zones
+- Exactly 6 systemScores, shared across both eyes
+- 2-5 artifacts per eye (strongest findings)
+- organ names MUST come from the zone fields already attached to the findings
+- "findingsIndex" is how much the iris shows, NOT a health score. Do not present
+  it as a measure of health anywhere in the text.
 - IGNORE white/blank eyelid-masked areas
 - "disclaimer" field is REQUIRED and must state this is not a medical diagnosis
 - "nutritionPlan" is the main deliverable and must be concrete and usable

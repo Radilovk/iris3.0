@@ -470,16 +470,25 @@ def build_mask(h, w, cx, cy, ir, coef_u, coef_l):
 # ==========================================
 # 5. UNWRAP (roll-corrected, mask-aware)
 # ==========================================
-def unwrap_iris_fast(img, mask, px, py, pr, ir, roll_rad=0.0):
+def unwrap_iris_fast(img, mask, px, py, pr, ir, roll_rad=0.0, mirrored=True):
     """
     Polar -> rectangular, rotated by roll_rad so column 0 is anatomical 12 o'clock.
     Masked (lid) samples become white, which is exactly the signal every AI prompt
     expects for "ignore this region".
+
+    `mirrored` says whether the photo is left-right mirrored, as a phone selfie
+    camera produces. The zone map is written for that convention: for a right eye
+    it places TEMPORAL at minute 15, which is the +x direction in the image, and
+    that only holds for a mirrored frame. A photo taken by someone else with the
+    rear camera is not mirrored, and analysing it under the wrong assumption
+    silently flips every organ attribution left for right — so the sweep direction
+    is reversed instead.
     """
     h_out, w_out = UNWRAP_H, UNWRAP_W
     theta0 = -np.pi / 2 + float(roll_rad)
+    direction = 1.0 if mirrored else -1.0
 
-    theta = np.linspace(theta0, theta0 + 2 * np.pi, w_out, endpoint=False).astype(np.float32)
+    theta = np.linspace(theta0, theta0 + direction * 2 * np.pi, w_out, endpoint=False).astype(np.float32)
     r_vals = np.linspace(pr, ir, h_out).astype(np.float32)
     theta_grid, r_grid = np.meshgrid(theta, r_vals)
 
@@ -653,7 +662,7 @@ def draw_overlay(img, px, py, pr, ir, corners=None):
 # ==========================================
 # 8. FULL PIPELINE FOR ONE EYE
 # ==========================================
-def analyze_eye(img, side):
+def analyze_eye(img, side, mirrored=True):
     """
     Full geometry pipeline for one eye. Returns a dict with either ok=True plus the
     strip/overlay/quality, or ok=False plus an actionable Bulgarian message.
@@ -693,7 +702,7 @@ def analyze_eye(img, side):
     mask, true_occluded = build_mask(h, w, pupil['x'], pupil['y'], iris['r'], coef_u, coef_l)
 
     unw, masked_fraction = unwrap_iris_fast(
-        img, mask, pupil['x'], pupil['y'], pupil['r'], iris['r'], roll['roll_rad'])
+        img, mask, pupil['x'], pupil['y'], pupil['r'], iris['r'], roll['roll_rad'], mirrored)
 
     # Judge on the worse of what we masked and what the lids actually cover.
     occlusion = max(masked_fraction, true_occluded)
@@ -727,6 +736,7 @@ def analyze_eye(img, side):
             'rollSource': roll['source'],
             'lidsDetected': coef_u is not None and coef_l is not None,
             'pupilRingOcclusion': round(pupil_occlusion, 3),
+            'mirrored': bool(mirrored),
         },
         'quality': {
             'irisConfidence': iris['confidence'],
@@ -741,28 +751,31 @@ def analyze_eye(img, side):
 # ==========================================
 # 9. HELPER: Call Cloudflare Worker for AI analysis
 # ==========================================
-def call_worker_analysis(strip_b64, side, questionnaire=None, ai_provider=None, ai_model=None,
-                         quality=None):
+def call_worker_analysis(strips, questionnaire=None, ai_provider=None, ai_model=None):
     """
-    Call the Cloudflare Worker to analyze the unwrapped iris strip.
-    Returns the AI analysis result or None if worker is not configured.
+    Send the unwrapped iris strips to the Cloudflare Worker for one combined
+    analysis. `strips` maps side ('R'/'L') to {'strip': base64, 'quality': dict}.
+
+    Both eyes go in a single request because the report is written over both:
+    the right eye reads the right side of the body and the left the left, and
+    several zones exist in only one eye.
     """
-    if not WORKER_URL:
+    if not WORKER_URL or not strips:
         return None
 
     try:
-        image_hash = hashlib.sha256(strip_b64.encode()).hexdigest()[:12]
+        joined = ''.join(strips[s]['strip'] for s in sorted(strips))
+        image_hash = hashlib.sha256(joined.encode()).hexdigest()[:12]
 
-        data = {
-            'strip_image': strip_b64,
-            'side': side,
-            'image_hash': image_hash,
-        }
+        data = {'image_hash': image_hash}
+        for side, payload in strips.items():
+            key = side.lower()
+            data[f'strip_image_{key}'] = payload['strip']
+            if payload.get('quality'):
+                data[f'capture_quality_{key}'] = json.dumps(payload['quality'])
+
         if questionnaire:
             data['questionnaire'] = json.dumps(questionnaire)
-        if quality:
-            data['capture_quality'] = json.dumps(quality)
-
         if ai_provider or DEFAULT_AI_PROVIDER:
             data['ai_provider'] = ai_provider or DEFAULT_AI_PROVIDER
         if ai_model or DEFAULT_AI_MODEL:
@@ -798,6 +811,7 @@ def process():
     head/camera roll, unwrap, and optionally send to the Worker for AI analysis.
     """
     results = {}
+    strips = {}
 
     questionnaire = None
     q_raw = request.form.get('questionnaire')
@@ -808,6 +822,8 @@ def process():
             pass
 
     run_ai = request.form.get('run_ai', 'false').lower() == 'true'
+    # Selfie cameras mirror the frame; the zone map is written for that convention.
+    mirrored = request.form.get('mirrored', 'true').lower() != 'false'
     ai_provider = request.form.get('ai_provider')
     ai_model = request.form.get('ai_model')
 
@@ -828,7 +844,7 @@ def process():
             scale = min(max_dimension / w, max_dimension / h)
             img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-        analysis = analyze_eye(img, sc)
+        analysis = analyze_eye(img, sc, mirrored)
 
         if not analysis['ok']:
             results[sc] = {
@@ -841,21 +857,19 @@ def process():
         b_ovl = base64.b64encode(cv2.imencode('.jpg', analysis['overlay'])[1]).decode()
         b_map = base64.b64encode(cv2.imencode('.jpg', analysis['mapped'])[1]).decode()
 
-        result = {
+        results[sc] = {
             'found': True,
             'overlay': b_ovl,
             'mapped': b_map,
             'quality': analysis['quality'],
             'geometry': analysis['geometry'],
         }
+        strips[sc] = {'strip': b_map, 'quality': analysis['quality']}
 
-        if run_ai and WORKER_URL:
-            ai_result = call_worker_analysis(b_map, sc, questionnaire, ai_provider, ai_model,
-                                             analysis['quality'])
-            if ai_result:
-                result['ai_analysis'] = ai_result
-
-        results[sc] = result
+    if run_ai and WORKER_URL and strips:
+        ai_result = call_worker_analysis(strips, questionnaire, ai_provider, ai_model)
+        if ai_result:
+            results['ai_analysis'] = ai_result
 
     results['worker_configured'] = bool(WORKER_URL)
     return jsonify(results)
@@ -871,13 +885,20 @@ def analyze():
     if not WORKER_URL:
         return jsonify({'error': 'AI analysis worker not configured. Set IRIS_WORKER_URL environment variable.'}), 503
 
-    strip_b64 = request.form.get('strip_image')
-    side = request.form.get('side', 'R').upper()
-
-    if not strip_b64:
-        return jsonify({'error': 'strip_image is required'}), 400
-    if side not in ('R', 'L'):
-        return jsonify({'error': 'side must be R or L'}), 400
+    strips = {}
+    for side in ('R', 'L'):
+        strip = request.form.get(f'strip_image_{side.lower()}')
+        if strip:
+            strips[side] = {'strip': strip, 'quality': None}
+    if not strips:
+        strip_b64 = request.form.get('strip_image')
+        side = request.form.get('side', 'R').upper()
+        if strip_b64:
+            if side not in ('R', 'L'):
+                return jsonify({'error': 'side must be R or L'}), 400
+            strips[side] = {'strip': strip_b64, 'quality': None}
+    if not strips:
+        return jsonify({'error': 'strip_image_r and/or strip_image_l are required'}), 400
 
     questionnaire = None
     q_raw = request.form.get('questionnaire')
@@ -890,7 +911,7 @@ def analyze():
     ai_provider = request.form.get('ai_provider')
     ai_model = request.form.get('ai_model')
 
-    result = call_worker_analysis(strip_b64, side, questionnaire, ai_provider, ai_model)
+    result = call_worker_analysis(strips, questionnaire, ai_provider, ai_model)
     return jsonify(result)
 
 

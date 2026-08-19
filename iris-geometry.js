@@ -541,20 +541,29 @@
    * Polar -> rectangular, rotated by `rollRad` so column 0 is anatomical 12 o'clock.
    * Masked (lid) samples are written as white, which is exactly the signal every
    * AI prompt expects for "ignore this region".
+   *
+   * `mirrored` says whether the photo is left-right mirrored, as a phone selfie
+   * camera produces. The zone map is written for that convention: for a right eye
+   * it places TEMPORAL at minute 15, which is the +x direction in the image, and
+   * that only holds for a mirrored frame. A photo taken by someone else with the
+   * rear camera is not mirrored, and analysing it under the wrong assumption
+   * silently flips every organ attribution left for right - measured at up to nine
+   * sectors of displacement - so the sweep direction is reversed instead.
    */
-  function unwrap(srcMat, mask, px, py, pr, ir, rollRad) {
+  function unwrap(srcMat, mask, px, py, pr, ir, rollRad, mirrored) {
     const W = SPEC.unwrap.width, H = SPEC.unwrap.height;
     const out = new cv.Mat(H, W, cv.CV_8UC4);
     const src = srcMat.data;
     const sw = srcMat.cols, sh = srcMat.rows, sc = srcMat.channels();
     const dst = out.data;
     const theta0 = -Math.PI / 2 + (rollRad || 0);
+    const direction = (mirrored === false) ? -1 : 1;
 
     let masked = 0;
     for (let y = 0; y < H; y++) {
       const radius = pr + (y / H) * (ir - pr);
       for (let x = 0; x < W; x++) {
-        const angle = theta0 + (x / W) * 2 * Math.PI;
+        const angle = theta0 + direction * (x / W) * 2 * Math.PI;
         const sx = Math.round(px + radius * Math.cos(angle));
         const sy = Math.round(py + radius * Math.sin(angle));
         const di = (y * W + x) * 4;
@@ -721,7 +730,7 @@
    * Returns { ok, code, message, strip (canvas), quality, geometry } — and on
    * failure, actionable Bulgarian guidance instead of a silently bad strip.
    */
-  function analyzeEye(srcMat, side, stripCanvas) {
+  function analyzeEye(srcMat, side, stripCanvas, mirrored) {
     const gray = toGray(srcMat);
     const enhanced = enhance(gray);
 
@@ -754,7 +763,7 @@
     const roll = estimateRoll(lids.coefUpper, lids.coefLower, pupil.x, iris.r);
     const masked = buildMask(srcMat.cols, srcMat.rows, pupil.x, pupil.y, iris.r, lids.coefUpper, lids.coefLower);
 
-    const un = unwrap(srcMat, masked.mask, pupil.x, pupil.y, pupil.r, iris.r, roll.rollRad);
+    const un = unwrap(srcMat, masked.mask, pupil.x, pupil.y, pupil.r, iris.r, roll.rollRad, mirrored);
 
     // Judge on the worse of what we masked and what the lids actually cover.
     const occlusion = Math.max(un.maskedFraction, masked.trueOccluded);
@@ -779,6 +788,7 @@
         corners: roll.corners,
         lidsDetected: !!(lids.coefUpper && lids.coefLower),
         pupilRingOcclusion: Math.round(pupilOcclusion * 1000) / 1000,
+        mirrored: mirrored !== false,
       },
       quality: {
         // Honest composite: edge strength, pupil roundness, visible area, and

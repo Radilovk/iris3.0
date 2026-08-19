@@ -805,38 +805,71 @@
                     <ul>${plan.cautions.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>`;
             }
 
-            // Overall Health Score
-            if (analysis.overallHealth !== undefined) {
+            // How much the iris shows — deliberately not framed as a health score.
+            if (analysis.findingsIndex !== undefined) {
                 html += `
                     <div class="overall-health">
-                        <div class="score ${getScoreClass(analysis.overallHealth)}">${analysis.overallHealth}</div>
-                        <span class="label">Общ здравен индекс</span>
+                        <div class="score ${getScoreClass(analysis.findingsIndex)}">${analysis.findingsIndex}</div>
+                        <span class="label">Индекс на находките (не е оценка на здравето)</span>
                     </div>
                 `;
             }
-            
-            // Zones
-            if (analysis.zones && analysis.zones.length > 0) {
-                html += `
-                    <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                        <h3>🎯 Зони на ириса (${analysis.zones.length})</h3>
-                    </div>
-                    <div class="collapsible-content">
-                        <div class="zones-grid">
-                `;
-                analysis.zones.forEach(zone => {
-                    const statusClass = ['normal', 'attention', 'concern'].includes(zone.status) ? zone.status : 'normal';
+
+            // Zones and structures, per eye: the two eyes read different sides
+            // of the body, so they are reported separately rather than merged.
+            for (const eye of (analysis.eyes || [])) {
+                const eyeName = eye.side === 'R' ? 'Дясно око' : 'Ляво око';
+
+                if (eye.zones && eye.zones.length > 0) {
                     html += `
-                        <div class="zone-card ${statusClass}">
-                            <div class="zone-name">${escapeHtml(zone.name || 'Зона ' + zone.id)}</div>
-                            <div class="zone-organ">${escapeHtml(zone.organ || '')}</div>
-                            ${zone.findings ? `<div class="zone-findings">${escapeHtml(zone.findings)}</div>` : ''}
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h3>🎯 ${eyeName} — зони (${eye.zones.length})</h3>
                         </div>
+                        <div class="collapsible-content">
+                            <div class="zones-grid">
                     `;
-                });
-                html += `</div></div>`;
+                    eye.zones.forEach(zone => {
+                        const statusClass = ['normal', 'attention', 'concern'].includes(zone.status) ? zone.status : 'normal';
+                        html += `
+                            <div class="zone-card ${statusClass}">
+                                <div class="zone-name">${escapeHtml(zone.name || 'Зона ' + zone.id)}</div>
+                                <div class="zone-organ">${escapeHtml(zone.organ || '')}</div>
+                                ${zone.findings ? `<div class="zone-findings">${escapeHtml(zone.findings)}</div>` : ''}
+                            </div>
+                        `;
+                    });
+                    html += `</div></div>`;
+                }
+
+                if (eye.artifacts && eye.artifacts.length > 0) {
+                    html += `
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h3>🔍 ${eyeName} — структури (${eye.artifacts.length})</h3>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="artifacts-list">
+                    `;
+                    eye.artifacts.forEach(art => {
+                        const severityClass = ['low', 'medium', 'high'].includes(art.severity) ? art.severity : 'low';
+                        html += `
+                            <div class="artifact-item severity-${severityClass}">
+                                <div>
+                                    <span class="artifact-type">${escapeHtml(art.type)}</span>
+                                    <span class="artifact-location"> @ ${escapeHtml(art.location)}</span>
+                                </div>
+                                <div class="artifact-desc">${escapeHtml(art.description || '')}</div>
+                            </div>
+                        `;
+                    });
+                    html += `</div></div>`;
+                }
+
+                if (eye.collarette && eye.collarette.note) {
+                    html += `<p class="muted">${eyeName} — автономен венец:
+                        ${escapeHtml(eye.collarette.status || '')} · ${escapeHtml(eye.collarette.note)}</p>`;
+                }
             }
-            
+
             // System Scores
             if (analysis.systemScores && analysis.systemScores.length > 0) {
                 html += `
@@ -859,32 +892,8 @@
                 html += `</div></div>`;
             }
             
-            // Artifacts
-            if (analysis.artifacts && analysis.artifacts.length > 0) {
-                html += `
-                    <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                        <h3>🔍 Открити структури (${analysis.artifacts.length})</h3>
-                    </div>
-                    <div class="collapsible-content">
-                        <div class="artifacts-list">
-                `;
-                analysis.artifacts.forEach(art => {
-                    const severityClass = ['low', 'medium', 'high'].includes(art.severity) ? art.severity : 'low';
-                    html += `
-                        <div class="artifact-item severity-${severityClass}">
-                            <div>
-                                <span class="artifact-type">${escapeHtml(art.type)}</span>
-                                <span class="artifact-location"> @ ${escapeHtml(art.location)}</span>
-                            </div>
-                            <div class="artifact-desc">${escapeHtml(art.description || '')}</div>
-                        </div>
-                    `;
-                });
-                html += `</div></div>`;
-            }
-            
             // Advice
-            if (advice && (advice.priorities || advice.nutrition || advice.lifestyle || advice.followUp)) {
+            if (advice && (advice.priorities || advice.lifestyle || advice.followUp)) {
                 html += `
                     <div class="collapsible-header" onclick="toggleCollapsible(this)">
                         <h3>💡 Препоръки</h3>
@@ -1042,11 +1051,6 @@
                         ovlContainer.classList.remove('hidden');
                         mapContainer.classList.remove('hidden');
                         
-                        // Show AI results if available
-                        if (d.ai_analysis) {
-                            const aiContainer = document.getElementById('aiResults' + side);
-                            renderAIResults(aiContainer, d.ai_analysis);
-                        }
                     } else if (d && d.error) {
                         const aiContainer = document.getElementById('aiResults' + side);
                         aiContainer.innerHTML = `<p style="color: var(--danger);">⚠️ ${d.error}</p>`;
@@ -1056,6 +1060,11 @@
                 
                 showResults('R', data.R);
                 showResults('L', data.L);
+
+                // One combined report covers both eyes, so it is rendered once.
+                if (data.ai_analysis) {
+                    renderAIResults(document.getElementById('aiResultsR'), data.ai_analysis);
+                }
                 
                 // Set appropriate status message
                 let statusMsg = "Готово! ";

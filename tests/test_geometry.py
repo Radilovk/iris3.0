@@ -151,6 +151,48 @@ def test_roll_matters():
           f'corrected S{corrected}')
 
 
+def test_mirroring():
+    """
+    The zone map assumes a selfie-mirrored frame. A photo taken by someone else
+    with the rear camera is not mirrored, and reading it under the wrong
+    assumption flips the map left for right. Same eye, same anatomy, either
+    convention: the sector must come out the same.
+    """
+    print('\nCAPTURE MIRRORING (selfie vs rear camera)')
+    import cv2
+    for angle in (45, 105, 200, 300):
+        selfie = synth_eye(marks=[(angle, 0.55, 14, 30)])
+        rear = cv2.flip(selfie, 1)
+
+        a = _sector_with(selfie, mirrored=True)
+        b = _sector_with(rear, mirrored=False)
+        wrong = _sector_with(rear, mirrored=True)
+
+        check(f'{angle}°: both conventions agree', a == b, f'selfie S{a} vs rear S{b}')
+        check(f'{angle}°: wrong convention does move it', wrong != a,
+              f'misread as S{wrong} instead of S{a}')
+
+
+def _sector_with(img, mirrored):
+    """Sector a known mark lands in, under a given capture convention."""
+    import cv2
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    enhanced = app.preprocess_image(img)
+    pupil = app.find_pupil(enhanced)
+    iris = app.find_iris_outer_boundary(gray, pupil['x'], pupil['y'], pupil['r'])
+    coef_u, coef_l = app.fit_eyelids(enhanced, pupil['x'], pupil['y'], iris['r'], pupil['r'])
+    roll = app.estimate_roll(coef_u, coef_l, pupil['x'], iris['r'])
+    mask, _ = app.build_mask(h, w, pupil['x'], pupil['y'], iris['r'], coef_u, coef_l)
+    unw, _ = app.unwrap_iris_fast(img, mask, pupil['x'], pupil['y'], pupil['r'],
+                                  iris['r'], roll['roll_rad'], mirrored)
+    g = cv2.cvtColor(unw, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    g[g > 200] = np.nan
+    with np.errstate(all='ignore'):
+        col = np.nan_to_num(np.nanmean(g, axis=0), nan=255.0)
+    return int(int(np.argmin(col)) / (app.UNWRAP_W / app.N_SECTORS)) + 1
+
+
 # ---------------------------------------------------------------------------
 def test_eyelid_masking():
     """Lid regions must arrive as white, since every AI prompt keys off that."""
@@ -240,6 +282,7 @@ if __name__ == '__main__':
     test_roll_estimation()
     test_sector_roundtrip()
     test_roll_matters()
+    test_mirroring()
     test_eyelid_masking()
     test_pupil_visibility()
     test_validity_gate()
