@@ -153,6 +153,8 @@ async function handleAnalyze(request, env) {
   const imageHash    = form.get('image_hash') || genId();
   const qRaw         = form.get('questionnaire');
   const questionnaire = qRaw ? safeParseJSON(qRaw) : {};
+  const cqRaw        = form.get('capture_quality');
+  const captureQuality = cqRaw ? safeParseJSON(cqRaw) : null;
 
   const aiProvider   = form.get('ai_provider') || null;
   const aiModel      = form.get('ai_model') || null;
@@ -182,7 +184,7 @@ async function handleAnalyze(request, env) {
   }
 
   // Run 3-call pipeline
-  const pipeline = new IrisPipeline(effectiveEnv, stripB64, side, imageHash, questionnaire);
+  const pipeline = new IrisPipeline(effectiveEnv, stripB64, side, imageHash, questionnaire, captureQuality);
   const result = await pipeline.run();
 
   // Store in KV with 24-hour TTL (even errors, to avoid hammering AI on bad images)
@@ -218,13 +220,15 @@ async function handleGetResult(key, env) {
 // 3-CALL PIPELINE CLASS
 // =====================================================================
 class IrisPipeline {
-  constructor(env, stripB64, side, imageHash, questionnaire) {
+  constructor(env, stripB64, side, imageHash, questionnaire, captureQuality) {
     this.env          = env;
     this.imageB64     = stripB64;
     this.imageDataUrl = `data:image/jpeg;base64,${stripB64}`;
     this.side         = side;
     this.imageHash    = imageHash;
     this.questionnaire = questionnaire;
+    // How good the capture actually was, measured by the client geometry stage.
+    this.captureQuality = captureQuality || null;
   }
 
   async run() {
@@ -246,11 +250,14 @@ class IrisPipeline {
       return { error: call2.error || call2, stage: 'CALL2_VERIFY', imageHash: this.imageHash, side: this.side };
     }
     call2 = postProcessDetection(call2);
+    // Organ attribution happens here, in code, from the labels the model read —
+    // never by asking the model to re-derive coordinates.
+    call2 = attachZones(call2, this.side);
 
     // ── CALL 3: Report Generation (text only — no image needed) ──────
     // Synthesize verified findings into Bulgarian UI format with advice
     const call3 = await this.textCall(
-      promptCall3_Report(this.side, this.imageHash, call1, call2, this.questionnaire)
+      promptCall3_Report(this.side, this.imageHash, call1, call2, this.questionnaire, this.captureQuality)
     );
 
     return {
@@ -589,6 +596,109 @@ const PRIORITY_ZONE_IDS = new Set([
 MAP_V9.forEach(z => { z.priority = PRIORITY_ZONE_IDS.has(z.id); });
 
 // =====================================================================
+// ZONE MATCHING (deterministic, in code — never asked of the model)
+// =====================================================================
+// Matching a finding to a zone is interval arithmetic, so it belongs here rather
+// than in a prompt. Just as important: this map is heavily overlapping — for the
+// right eye, 314 of 720 (minute x ring) cells are claimed by two or more zones and
+// some by six. Any single "winning" organ is therefore partly an artefact of the
+// tie-break rule, so matching reports the runners-up and flags ambiguity instead
+// of presenting one confident organ name.
+
+function rangeOverlap(a, b) {
+  return Math.min(a[1], b[1]) - Math.max(a[0], b[0]);
+}
+
+function scoreZone(minuteRange, ringRange, zone) {
+  const mOv = rangeOverlap(minuteRange, zone.mins);
+  const rOv = rangeOverlap(ringRange, zone.rings);
+  if (mOv < 0 || rOv < 0) return null;
+
+  const zoneArea = (zone.mins[1] - zone.mins[0] + 1) * (zone.rings[1] - zone.rings[0] + 1);
+  const overlapArea = (mOv + 1) * (rOv + 1);
+  // Reward real overlap, prefer the more specific (smaller) zone, and prefer a
+  // side-specific zone over an "ANY" catch-all covering the whole iris.
+  const specificity = 1 / Math.sqrt(zoneArea);
+  const sideBonus = zone.side === 'ANY' ? 0.85 : 1.0;
+  return { score: overlapArea * specificity * sideBonus, overlapArea, zoneArea };
+}
+
+/**
+ * Rank the zones a finding could belong to.
+ * Returns { primary, alternates, ambiguous, systemLabel } — ambiguous when the
+ * runner-up is nearly as good a fit, which on this map is common.
+ */
+function matchZones(minuteRange, ringRange, side) {
+  const scored = [];
+  for (const zone of MAP_V9) {
+    if (zone.side !== side && zone.side !== 'ANY') continue;
+    const s = scoreZone(minuteRange, ringRange, zone);
+    if (s) scored.push({ zone, ...s });
+  }
+  if (!scored.length) {
+    return { primary: null, alternates: [], ambiguous: false, systemLabel: null };
+  }
+
+  scored.sort((a, b) => (b.score - a.score) || (a.zoneArea - b.zoneArea));
+  const top = scored[0];
+  const runnerUp = scored[1];
+  const ambiguous = !!runnerUp && runnerUp.score >= 0.75 * top.score;
+
+  return {
+    primary: {
+      id: top.zone.id,
+      organ_bg: top.zone.organ_bg,
+      system_bg: top.zone.system_bg,
+      priority: !!top.zone.priority,
+    },
+    alternates: scored.slice(1, 4).map(s => ({
+      id: s.zone.id, organ_bg: s.zone.organ_bg, system_bg: s.zone.system_bg,
+    })),
+    ambiguous,
+    // What we can state without overclaiming when several organs fit equally.
+    systemLabel: top.zone.system_bg,
+  };
+}
+
+/** Attach zone matches to every finding of a verified detection payload. */
+function attachZones(json, side) {
+  if (!json || json.error) return json;
+  const withZone = (f) => {
+    if (!f || !f.minuteRange || !f.ringRange) return f;
+    const m = matchZones(f.minuteRange, f.ringRange, side);
+    return { ...f, zone: m.primary, zoneAlternates: m.alternates, zoneAmbiguous: m.ambiguous };
+  };
+  const out = { ...json };
+  if (Array.isArray(out.verified_structural)) out.verified_structural = out.verified_structural.map(withZone);
+  if (Array.isArray(out.verified_pigment)) out.verified_pigment = out.verified_pigment.map(withZone);
+
+  // Rebuild the zone summary from the matches rather than trusting the model's.
+  const counts = new Map();
+  for (const f of [...(out.verified_structural || []), ...(out.verified_pigment || [])]) {
+    if (!f.zone) continue;
+    const key = f.zone.id;
+    const entry = counts.get(key) || {
+      zoneId: key, organ_bg: f.zone.organ_bg, system_bg: f.zone.system_bg,
+      priority: f.zone.priority, evidenceCount: 0, ambiguousCount: 0, types: {},
+    };
+    entry.evidenceCount++;
+    if (f.zoneAmbiguous) entry.ambiguousCount++;
+    entry.types[f.type] = (entry.types[f.type] || 0) + 1;
+    counts.set(key, entry);
+  }
+  out.zoneSummary = Array.from(counts.values())
+    .map(e => ({
+      zoneId: e.zoneId, organ_bg: e.organ_bg, system_bg: e.system_bg,
+      priority: e.priority, evidenceCount: e.evidenceCount,
+      ambiguousCount: e.ambiguousCount,
+      topTypes: Object.entries(e.types).map(([t, c]) => `${t}:${c}`),
+    }))
+    .sort((a, b) => b.evidenceCount - a.evidenceCount);
+
+  return out;
+}
+
+// =====================================================================
 // CALL 1: FULL DETECTION (vision + image)
 // Combines: STEP1 geo + STEP2A structural + STEP2B pigment + STEP2B_ANW collarette
 // =====================================================================
@@ -856,31 +966,27 @@ COLLARETTE:
   defects contradict, note the discrepancy.
 
 ================================================================================
-PART C: ZONE MAPPING — Match findings to anatomical zones
+PART C: (NOT YOUR JOB) — ZONE MAPPING IS DONE IN CODE
 ================================================================================
 
-Match each VERIFIED finding to the most specific zone from MAP_V9 below using
-(side + minuteRange + ringRange overlap):
+Do NOT map findings to organs, and do NOT output any organ or zone name here.
+Anatomical mapping is pure interval arithmetic and is performed deterministically
+after this call, from the sector/ring-group labels you report. Your only job is
+to describe WHAT you see and WHERE it sits on the printed grid, accurately.
 
-${JSON.stringify(MAP_V9.filter(z => z.side === side || z.side === 'ANY'))}
-
-MATCH RULE: zone matches if:
-- zone.side == "${side}" or zone.side == "ANY"
-- finding.minuteRange overlaps zone.mins (max(starts) ≤ min(ends))
-- finding.ringRange overlaps zone.rings
-
-TIE-BREAK: prefer side-specific over ANY, prefer smaller zone area.
+Reporting an organ name here would mean re-deriving numeric coordinates by eye,
+which is exactly the error this pipeline is designed to avoid.
 
 ================================================================================
 PART D: PROFILE BUILD — Derive health axes and channels
 ================================================================================
 
-From the verified and mapped findings, compute:
+From the verified findings, compute (WITHOUT naming organs — see Part C):
 1. Constitution/disposition/diathesis from global traits.
 2. ANW profile from collarette segments.
-3. Elimination channels: gut_ANW → kidney → lymph → skin (status + evidence).
+3. Ring-group load: for each ring group with findings, how loaded it looks
+   (normal | attention | concern) plus the finding ids that justify it.
 4. Axes: stress (0-100), digestive (0-100), immune (0-100).
-5. Hypotheses: preventive health claims citing specific findings + zones.
 
 ================================================================================
 OUTPUT — JSON ONLY — EXACT STRUCTURE:
@@ -890,10 +996,10 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
   "imgId": "${imageHash}",
   "side": "${side}",
   "verified_structural": [
-    {"fid":"S1","type":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"size":"xs|s|m|l","notes":"<=60","confidence":0.0,"zone":{"id":"...","organ_bg":"...","system_bg":"..."},"status":"confirmed|corrected|new"}
+    {"fid":"S1","type":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"size":"xs|s|m|l","notes":"<=60","confidence":0.0,"status":"confirmed|corrected|new"}
   ],
   "verified_pigment": [
-    {"fid":"P1","type":"...","subtype":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"severity":"low|medium|high","notes":"<=60","confidence":0.0,"zone":{"id":"...","organ_bg":"...","system_bg":"..."},"status":"confirmed|corrected|new"}
+    {"fid":"P1","type":"...","subtype":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"severity":"low|medium|high","notes":"<=60","confidence":0.0,"status":"confirmed|corrected|new"}
   ],
   "collarette_verified": {
     "ANW_status": "expanded|contracted|broken|normal|mixed|unclear",
@@ -915,16 +1021,10 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
     "diathesis": [{"code":"HAC|LRS|LIP|DYS","confidence":0.0}],
     "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
   },
-  "zoneSummary": [
-    {"zoneId":"...","organ_bg":"...","system_bg":"...","evidenceCount":0,"topTypes":["type:count"]}
-  ],
   "profile": {
     "axesScore": {"stress0_100":0,"digestive0_100":0,"immune0_100":0},
-    "elimChannels": [
-      {"channel":"gut_ANW","status":"normal|attention|concern","evidence":[{"fid":"S1","zoneId":"..."}]},
-      {"channel":"kidney","status":"normal|attention|concern","evidence":[]},
-      {"channel":"lymph","status":"normal|attention|concern","evidence":[]},
-      {"channel":"skin_scu","status":"normal|attention|concern","evidence":[]}
+    "ringGroupLoad": [
+      {"ringGroup":"STOM|ANW|ORG_IN|ORG_MID|ORG_OUT|LYM|SCU","status":"normal|attention|concern","evidence":[{"fid":"S1"}]}
     ],
     "ANW_profile": {
       "overallIntegrity":"good|moderate|poor",
@@ -948,7 +1048,7 @@ FAILSAFE:
 // CALL 3: REPORT GENERATION (text only — no image)
 // Combines: STEP5 Bulgarian report
 // =====================================================================
-function promptCall3_Report(side, imageHash, call1, call2, questionnaire) {
+function promptCall3_Report(side, imageHash, call1, call2, questionnaire, captureQuality) {
   const q = questionnaire || {};
   return `IRIS PIPELINE — CALL3: Bulgarian Report Generation (v11)
 
@@ -959,6 +1059,7 @@ INPUTS:
   DETECTION = ${JSON.stringify(call1)}
   VERIFIED  = ${JSON.stringify(call2)}
   QUESTIONNAIRE = ${JSON.stringify(q)}
+  CAPTURE_QUALITY = ${JSON.stringify(captureQuality || {})}
   SIDE = ${side}
   IMG_ID = ${imageHash}
 
@@ -976,18 +1077,45 @@ NOT MEDICAL — MANDATORY FRAMING:
   slightly but must state clearly: not a medical diagnosis, informational/
   wellness use only, consult a doctor for real symptoms).
 
+ROLE OF THE IRIS IN THIS REPORT (read carefully — this drives everything):
+- The iris findings are a SUPPORTING signal, not the basis of the advice. The
+  nutrition plan is built primarily from the QUESTIONNAIRE, which is real
+  self-reported data. Iris findings only shift emphasis between options that
+  are already appropriate for that person.
+- Never invent a restriction, a deficiency, or a condition from the iris alone.
+- If QUESTIONNAIRE is sparse, say so in dataQuality and keep the plan
+  correspondingly general — do NOT compensate by leaning harder on the iris.
+
 CORE TRUTH RULE:
-- ORGAN and SYSTEM names MUST come from VERIFIED.zoneSummary and VERIFIED.verified_structural / verified_pigment zone fields.
-- The 12 UI zones below are DISPLAY BUCKETS ONLY, and correspond 1:1 to
-  sectors S1..S12 already used throughout detection (Zone N = Sector N).
-- ORGAN NAMING PER ZONE — general vs specific label:
-  - If the zone's dominant evidence maps to a PRIORITY zone in MAP_V9
-    (metabolism/endocrine/digestion — the ones CALL1/CALL2 gave extra
-    scrutiny to), use the SPECIFIC organ_bg name (e.g. "Панкреас").
-  - Otherwise use the general system_bg label instead of a specific organ
-    name (e.g. "Опорно-двигателна" rather than "Тазобедрена става") — keeps
-    the visual 12-zone map but avoids overstating precision outside the
-    requested focus area.
+- ORGAN and SYSTEM names MUST come ONLY from the zone fields already attached
+  to each finding (zone.organ_bg / zone.system_bg). These were computed in code.
+  Do NOT infer an organ from coordinates yourself and do NOT introduce any organ
+  name that is not present in VERIFIED.
+- The 12 UI zones are DISPLAY BUCKETS ONLY and correspond 1:1 to sectors
+  S1..S12 already used throughout detection (Zone N = Sector N).
+
+AMBIGUITY IS EXPLICIT — RESPECT IT:
+- Each finding carries zoneAmbiguous and zoneAlternates. The underlying map
+  overlaps heavily: many positions are claimed by several organs at once, so a
+  single organ name is often partly an artefact of the tie-break.
+- If zoneAmbiguous is true → use the general system label (zone.system_bg), NOT
+  the specific organ name. You may mention the alternatives together in the
+  findings text (e.g. "черен дроб или жлъчен мехур"), never as a single verdict.
+- If zoneAmbiguous is false AND zone.priority is true (metabolism / endocrine /
+  digestion — the requested focus) → use the SPECIFIC organ name.
+- If zoneAmbiguous is false but zone.priority is false → prefer the system
+  label; a specific organ is allowed only when evidence is strong (confidence
+  >= 0.75).
+
+CAPTURE QUALITY GOVERNS CONFIDENCE:
+- CAPTURE_QUALITY carries how good the photo actually was (score 0-100,
+  visibleFraction, and rollCorrected — whether an anatomical rotation reference
+  could be established from the eye corners).
+- If rollCorrected is false, the angular position of every finding may be off by
+  up to a sector. In that case: prefer system labels over organ names throughout,
+  and say so in dataQuality.
+- If score < 55 or visibleFraction < 0.7, keep zone statuses conservative
+  (avoid "concern" unless the questionnaire independently supports it).
 
 VALIDATION PRIORITY (cross-reference with QUESTIONNAIRE):
   1) ВИСОК — потвърдено от въпросника (highest weight)
@@ -1034,15 +1162,38 @@ SYSTEM SCORES (always exactly 6):
   specific descriptions since those map to the priority focus area; the
   other three can stay more general.
 
+NUTRITION PLAN — THIS IS THE MAIN DELIVERABLE:
+  Build a concrete, usable daily plan, not a list of slogans.
+  - Source of truth order: (1) QUESTIONNAIRE — goals, complaints, dietary
+    habits, allergies, medications, activity, sleep, age/sex/BMI; (2) general
+    sound nutrition practice; (3) iris priority-zone findings, for emphasis only.
+  - dayPlan: 4-5 entries (Закуска, Обяд, Следобедна закуска, Вечеря, по избор
+    Преди сън). Each: meal (Bulgarian label), suggestion (concrete foods, a real
+    portion idea, ≤140 chars), rationale (≤100 chars, WHY for THIS person).
+  - emphasize / reduce: 3-6 each. Each has item (≤40) and reason (≤100). The
+    reason must reference the questionnaire where possible; only cite an iris
+    finding when it genuinely adds something, and then name the SYSTEM, not a
+    specific organ, unless that finding was unambiguous and priority.
+  - hydration: one concrete line (≤120).
+  - weeklyHabits: 2-4 small, checkable habits (≤100 each).
+  - cautions: allergies, medications, and anything the questionnaire flags that
+    should override a generic suggestion. If allergies/medications are present in
+    QUESTIONNAIRE they MUST be reflected here. Empty array only if truly nothing.
+  - notForYou: 1-3 explicit statements of what this plan does NOT address and
+    when to see a professional (≤120 each).
+
+DATA QUALITY (honest self-assessment, shown to the user):
+  - questionnaireCompleteness: "пълен|частичен|минимален"
+  - irisContribution: "съществен|поддържащ|ограничен" — how much the iris
+    actually shaped the plan. With poor capture quality or an unreliable
+    rotation reference this must be "ограничен".
+  - limitations: 1-3 short Bulgarian sentences naming the real limits of this
+    particular analysis (sparse questionnaire, occluded iris, no roll reference,
+    ambiguous zone attribution).
+
 ADVICE (Bulgarian, all values ≤ 120 chars):
-  priorities: 3-6 bullets | nutrition.focus: 3-6 | nutrition.limit: 3-6
-  lifestyle.sleep: 2-4 | lifestyle.stress: 2-4 | lifestyle.activity: 2-4
-  followUp: 2-5 bullets
-  nutrition.focus/limit MUST be driven primarily by QUESTIONNAIRE (goals,
-  complaints, allergies, dietary habits) with the priority-zone iris findings
-  (digestion/metabolism/endocrine) used only to bias emphasis — never invent
-  a restriction from the iris alone that isn't at least plausible given the
-  questionnaire.
+  priorities: 3-6 bullets | lifestyle.sleep: 2-4 | lifestyle.stress: 2-4
+  lifestyle.activity: 2-4 | followUp: 2-5 bullets
 
 ================================================================================
 OUTPUT — JSON ONLY — EXACT STRUCTURE:
@@ -1089,9 +1240,25 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
       {"system":"Ендокринна","score":80,"description":"<=60"}
     ]
   },
+  "nutritionPlan": {
+    "summary": "<=200 chars БГ - какъв е подходът за този човек и защо",
+    "dayPlan": [
+      {"meal":"Закуска","suggestion":"<=140 конкретни храни и порция","rationale":"<=100 защо за този човек"}
+    ],
+    "emphasize": [{"item":"<=40","reason":"<=100"}],
+    "reduce": [{"item":"<=40","reason":"<=100"}],
+    "hydration": "<=120",
+    "weeklyHabits": ["<=100"],
+    "cautions": ["<=120 - алергии, лекарства, важни ограничения"],
+    "notForYou": ["<=120 - какво този план НЕ покрива"]
+  },
+  "dataQuality": {
+    "questionnaireCompleteness": "пълен|частичен|минимален",
+    "irisContribution": "съществен|поддържащ|ограничен",
+    "limitations": ["<=140 БГ"]
+  },
   "advice": {
     "priorities": ["<=120 chars БГ"],
-    "nutrition": {"focus": ["<=120"], "limit": ["<=120"]},
     "lifestyle": {"sleep": ["<=120"], "stress": ["<=120"], "activity": ["<=120"]},
     "followUp": ["<=120"]
   },
@@ -1109,10 +1276,10 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
       "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
     },
     "structuralFindings": [
-      {"fid":"S1","type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","zone":"zone_id","organ_bg":"...","confidence":0.0}
+      {"fid":"S1","type":"...","sectorRange":[0,0],"ringGroup":"...","size":"xs|s|m|l","zone":"zone_id","organ_bg":"...","ambiguous":false,"confidence":0.0}
     ],
     "pigmentFindings": [
-      {"fid":"P1","type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","zone":"zone_id","organ_bg":"...","confidence":0.0}
+      {"fid":"P1","type":"...","subtype":"...","sectorRange":[0,0],"ringGroup":"...","severity":"low|medium|high","zone":"zone_id","organ_bg":"...","ambiguous":false,"confidence":0.0}
     ]
   }
 }
@@ -1128,6 +1295,9 @@ RULES:
 - organ names MUST come from the zone MAP
 - IGNORE white/blank eyelid-masked areas
 - "disclaimer" field is REQUIRED and must state this is not a medical diagnosis
+- "nutritionPlan" is the main deliverable and must be concrete and usable
+- "dataQuality" must be honest, including when the analysis is weak
+- Never state a specific organ for a finding whose zoneAmbiguous is true
 
 FAILSAFE:
 {"error":{"stage":"CALL3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
