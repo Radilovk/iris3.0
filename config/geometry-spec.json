@@ -1,0 +1,76 @@
+{
+  "_comment": "Single source of truth for the iris geometry pipeline. Both implementations (iris-geometry.js for the browser, app.py for the Flask/OpenCV path) MUST agree with these values. tests/test_geometry.py asserts that they do, so the two twins cannot drift silently the way they did before (webapp.html had lost eyelid masking entirely).",
+  "version": 12,
+
+  "unwrap": {
+    "width": 1200,
+    "height": 300,
+    "_comment": "Raw polar->rectangular output, 25 px per ring across 12 rings. The grid renderer resamples this into the non-uniform ring bands below."
+  },
+
+  "sectors": 12,
+
+  "ringGroups": [
+    { "name": "IPB",     "srcStart": 0,   "srcEnd": 25,  "destHeight": 20,  "rings": [0, 0] },
+    { "name": "STOM",    "srcStart": 25,  "srcEnd": 50,  "destHeight": 20,  "rings": [1, 1] },
+    { "name": "ANW",     "srcStart": 50,  "srcEnd": 100, "destHeight": 60,  "rings": [2, 3] },
+    { "name": "ORG_IN",  "srcStart": 100, "srcEnd": 150, "destHeight": 140, "rings": [4, 5] },
+    { "name": "ORG_MID", "srcStart": 150, "srcEnd": 200, "destHeight": 140, "rings": [6, 7] },
+    { "name": "ORG_OUT", "srcStart": 200, "srcEnd": 250, "destHeight": 140, "rings": [8, 9] },
+    { "name": "LYM",     "srcStart": 250, "srcEnd": 275, "destHeight": 40,  "rings": [10, 10] },
+    { "name": "SCU",     "srcStart": 275, "srcEnd": 300, "destHeight": 40,  "rings": [11, 11] }
+  ],
+
+  "grid": {
+    "paddingLeft": 100,
+    "paddingTop": 70,
+    "paddingBottom": 40,
+    "paddingRight": 20,
+    "sectorTintAlpha": 0.12
+  },
+
+  "pupil": {
+    "_comment": "Adaptive threshold replaces the old hard-coded value of 40, which merged pupil and iris on dark brown eyes and silently corrupted every downstream coordinate. Several dark-fractions are tried as competing hypotheses and the first whose pupil+iris pair passes the validity gate wins, because on a dark iris a single fraction can swallow the whole iris disc into the 'pupil'.",
+    "medianBlur": 7,
+    "darkFractions": [0.005, 0.01, 0.02, 0.04, 0.06],
+    "minThreshold": 15,
+    "maxThreshold": 90,
+    "minArea": 50,
+    "minCircularity": 0.55,
+    "closeKernel": 7
+  },
+
+  "iris": {
+    "minRadiusFactor": 2.2,
+    "maxRadiusFactor": 7.5,
+    "step": 2,
+    "minGradient": 5.0,
+    "goodGradient": 25.0
+  },
+
+  "eyelid": {
+    "_comment": "Lid candidate points are searched across the whole iris annulus above/below the pupil, not just a thin band near the rim. With the old narrow band a half-closed eye produced no lid fit at all, so it was silently treated as fully visible and lid skin was analysed as iris.",
+    "pupilMarginPx": 5,
+    "baseGradientThreshold": 25.0,
+    "ransacThreshold": 4.0,
+    "ransacIters": 450,
+    "maxCutFraction": 0.25,
+    "minPoints": 40,
+    "minFilteredPoints": 30
+  },
+
+  "roll": {
+    "_comment": "Camera/head roll is recovered from the two canthi (eye corners), found as the intersections of the fitted upper and lower eyelid curves. Without this, minute 0 is 'up in the image' rather than anatomical up, so a typical phone-selfie tilt shifted every sector by up to half a zone.",
+    "maxRollDeg": 25.0,
+    "minCornerSpanFactor": 1.5
+  },
+
+  "validity": {
+    "minPupilIrisRatio": 0.15,
+    "maxPupilIrisRatio": 0.75,
+    "maxMaskedFraction": 0.45,
+    "minIrisRadiusPx": 40,
+    "maxPupilRingOcclusion": 0.5,
+    "edgeMarginFactor": 0.9
+  }
+}

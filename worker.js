@@ -148,8 +148,6 @@ function handleHealthCheck(env) {
 // =====================================================================
 async function handleAnalyze(request, env) {
   const form = await request.formData();
-  const side         = (form.get('side') || 'R').toUpperCase();
-  const stripB64     = form.get('strip_image');
   const imageHash    = form.get('image_hash') || genId();
   const qRaw         = form.get('questionnaire');
   const questionnaire = qRaw ? safeParseJSON(qRaw) : {};
@@ -157,17 +155,40 @@ async function handleAnalyze(request, env) {
   const aiProvider   = form.get('ai_provider') || null;
   const aiModel      = form.get('ai_model') || null;
 
-  if (!stripB64) {
-    return jsonResp({ error: 'strip_image is required (base64 JPEG of the unwrapped iris strip)' }, 400);
+  // Both eyes belong in one report. Iridology reads the right eye for the right
+  // side of the body and the left for the left, and several zones in the map
+  // exist in only one eye — liver on the right, heart on the left — so analysing
+  // the eyes separately and keeping the "better" one silently threw away the
+  // only view of whole organs. Single-eye submissions are still accepted.
+  const eyes = [];
+  for (const side of ['R', 'L']) {
+    const strip = form.get(`strip_image_${side.toLowerCase()}`);
+    if (!strip) continue;
+    const cq = form.get(`capture_quality_${side.toLowerCase()}`);
+    eyes.push({ side, stripB64: strip, quality: cq ? safeParseJSON(cq) : null });
   }
-  if (side !== 'R' && side !== 'L') {
-    return jsonResp({ error: 'side must be "R" or "L"' }, 400);
+  if (!eyes.length) {
+    const strip = form.get('strip_image');
+    const side = (form.get('side') || 'R').toUpperCase();
+    if (strip) {
+      if (side !== 'R' && side !== 'L') {
+        return jsonResp({ error: 'side must be "R" or "L"' }, 400);
+      }
+      const cq = form.get('capture_quality');
+      eyes.push({ side, stripB64: strip, quality: cq ? safeParseJSON(cq) : null });
+    }
+  }
+  if (!eyes.length) {
+    return jsonResp({
+      error: 'strip_image_r and/or strip_image_l are required (base64 JPEG of the unwrapped iris strip)',
+    }, 400);
   }
 
   const kvConfig = await getKVConfig(env);
   const effectiveEnv = createEffectiveEnv(env, aiProvider, aiModel, kvConfig);
   const effectiveModel = effectiveEnv.AI_MODEL;
-  const cacheKey = `result:${side}:${imageHash}:${effectiveModel}`;
+  const sides = eyes.map(e => e.side).join('');
+  const cacheKey = `result:${sides}:${imageHash}:${effectiveModel}`;
 
   // Check cache
   let cached = null;
@@ -178,17 +199,16 @@ async function handleAnalyze(request, env) {
     console.error('KV get error:', kvErr?.message || kvErr);
   }
   if (cached) {
-    return jsonResp({ cached: true, imageHash, side, model: effectiveModel, result: cached });
+    return jsonResp({ cached: true, imageHash, sides, model: effectiveModel, result: cached });
   }
 
-  // Run 3-call pipeline
-  const pipeline = new IrisPipeline(effectiveEnv, stripB64, side, imageHash, questionnaire);
+  const pipeline = new IrisPipeline(effectiveEnv, eyes, imageHash, questionnaire);
   const result = await pipeline.run();
 
   // Store in KV with 24-hour TTL (even errors, to avoid hammering AI on bad images)
   await env.iris_rag_kv.put(cacheKey, JSON.stringify(result), { expirationTtl: 86400 }).catch(() => {});
 
-  return jsonResp({ cached: false, imageHash, side, model: effectiveModel, result });
+  return jsonResp({ cached: false, imageHash, sides, model: effectiveModel, result });
 }
 
 function createEffectiveEnv(env, aiProvider, aiModel, kvConfig) {
@@ -218,51 +238,73 @@ async function handleGetResult(key, env) {
 // 3-CALL PIPELINE CLASS
 // =====================================================================
 class IrisPipeline {
-  constructor(env, stripB64, side, imageHash, questionnaire) {
-    this.env          = env;
-    this.imageB64     = stripB64;
-    this.imageDataUrl = `data:image/jpeg;base64,${stripB64}`;
-    this.side         = side;
-    this.imageHash    = imageHash;
+  /** eyes: [{ side: 'R'|'L', stripB64, quality }] — one or both. */
+  constructor(env, eyes, imageHash, questionnaire) {
+    this.env = env;
+    this.eyes = eyes.map(e => ({
+      ...e,
+      dataUrl: `data:image/jpeg;base64,${e.stripB64}`,
+    }));
+    this.imageHash = imageHash;
     this.questionnaire = questionnaire;
   }
 
   async run() {
-    // ── CALL 1: Full Detection (vision + image) ──────────────────────
-    // Geo calibration + structural + pigment + ANW collarette — all in one vision call
-    const call1 = await this.visionCall(promptCall1_Detect(this.side, this.imageHash));
-    if (call1.error) {
-      return { error: call1.error || call1, stage: 'CALL1_DETECT', imageHash: this.imageHash, side: this.side };
-    }
-
-    // ── CALL 2: Verification & Zone Mapping (vision + image) ─────────
-    // Re-examine image with CALL1's findings: validate, refine, consistency check, zone mapping
-    const call2 = await this.visionCall(promptCall2_Verify(this.side, this.imageHash, call1));
-    if (call2.error) {
-      return { error: call2.error || call2, stage: 'CALL2_VERIFY', imageHash: this.imageHash, side: this.side };
+    // Detection and verification run per eye; the report is written once, over
+    // both, because a plan built from half the evidence is not a better plan.
+    const analysed = [];
+    for (const eye of this.eyes) {
+      const detected = await this.detectEye(eye);
+      if (detected.error) {
+        return { error: detected.error, stage: detected.stage, imageHash: this.imageHash, side: eye.side };
+      }
+      analysed.push(detected);
     }
 
     // ── CALL 3: Report Generation (text only — no image needed) ──────
-    // Synthesize verified findings into Bulgarian UI format with advice
     const call3 = await this.textCall(
-      promptCall3_Report(this.side, this.imageHash, call1, call2, this.questionnaire)
+      promptCall3_Report(this.imageHash, analysed, this.questionnaire)
     );
 
     return {
       imageHash: this.imageHash,
-      side: this.side,
+      sides: analysed.map(a => a.side),
       ...call3,
-      // Merge raw pipeline steps into call3's pipeline for debugging
+      // Raw pipeline steps kept for debugging.
       pipeline: {
         ...(call3.pipeline || {}),
-        _call1: call1,
-        _call2: call2,
+        _eyes: analysed.map(a => ({ side: a.side, call1: a.call1, call2: a.call2 })),
       },
     };
   }
 
-  async visionCall(prompt) {
-    return aiCall(this.env, prompt, this.imageDataUrl);
+  /** CALL1 + CALL2 for a single eye, with coordinates and organs resolved in code. */
+  async detectEye(eye) {
+    // ── CALL 1: Full Detection (vision + image) ──────────────────────
+    // Quality + structural + pigment + ANW collarette — all in one vision call
+    let call1 = await this.visionCall(promptCall1_Detect(eye.side, this.imageHash), eye.dataUrl);
+    if (call1.error) return { error: call1.error || call1, stage: 'CALL1_DETECT' };
+
+    // The model only ever reads sector/ringGroup labels off the image; the
+    // numeric minuteRange/ringRange used for zone matching is computed here,
+    // deterministically, instead of trusting the model's own arithmetic.
+    call1 = postProcessDetection(call1);
+
+    // ── CALL 2: Verification (vision + image) ────────────────────────
+    // Re-examine the image against CALL1: confirm, correct, reject false positives
+    let call2 = await this.visionCall(promptCall2_Verify(eye.side, this.imageHash, call1), eye.dataUrl);
+    if (call2.error) return { error: call2.error || call2, stage: 'CALL2_VERIFY' };
+
+    call2 = postProcessDetection(call2);
+    // Organ attribution happens here, in code, from the labels the model read —
+    // never by asking the model to re-derive coordinates.
+    call2 = attachZones(call2, eye.side);
+
+    return { side: eye.side, quality: eye.quality || null, call1, call2 };
+  }
+
+  async visionCall(prompt, dataUrl) {
+    return aiCall(this.env, prompt, dataUrl);
   }
 
   async textCall(prompt) {
@@ -400,49 +442,124 @@ IMAGE_FORMAT: UNWRAPPED_IRIS_STRIP (READ THIS BEFORE ANYTHING ELSE)
 CRITICAL NOTICE:
 The image you are analyzing is NOT a raw circular iris photograph.
 It is an UNWRAPPED (unrolled / linearized) iris strip produced by a
-polar-to-rectangular transformation of the original circular iris image.
+polar-to-rectangular transformation of the original circular iris image,
+then RESHAPED so the metabolism/digestion/endocrine-relevant organ zone
+gets much more vertical space than the rest.
 
-STRIP DIMENSIONS:
-  Full canvas : ~1280 x 390 px  (includes labeled margins)
-  Iris content: ~1200 x 300 px  (inside margins)
-  Left margin (~60 px) : ring labels R0, R1, ..., R11
-  Top margin  (~50 px) : minute tick marks 0, 5, 10, ..., 60
+LOCALIZATION METHOD — CLASSIFICATION, NOT MEASUREMENT:
+This image has two label systems PRINTED DIRECTLY ON IT. Locating a finding
+means READING which printed label it falls under — like picking a row/column
+in a spreadsheet — NOT estimating a pixel coordinate or doing geometry.
+DO NOT compute atan2, radial distance, or any pixel-offset formula. If you
+find yourself estimating "this is about 42% of the way across", stop — look
+again at which printed label the finding sits under/between.
 
-COORDINATE AXES:
-  X AXIS (horizontal) = ANGULAR POSITION IN MINUTES:
-    Left edge  = minute  0 = 12 o'clock
-    1/4 width  = minute 15 = 3 o'clock
-    1/2 width  = minute 30 = 6 o'clock
-    3/4 width  = minute 45 = 9 o'clock
-    Right edge = minute 60 = 12 o'clock again
-    Formula: minute = (x_pixel - 60) / 1200 * 60
+1) SECTOR (horizontal position, printed as "S1".."S12" above the minute
+   ticks, one per every 5-minute column):
+     S1 = minutes 0-5 (12 o'clock)     S7  = minutes 30-35 (6 o'clock)
+     S2 = minutes 5-10                 S8  = minutes 35-40
+     S3 = minutes 10-15 (3 o'clock)    S9  = minutes 40-45
+     S4 = minutes 15-20                S10 = minutes 45-50
+     S5 = minutes 20-25                S11 = minutes 50-55
+     S6 = minutes 25-30 (6 o'clock)    S12 = minutes 55-60 (12 o'clock)
+   The strip also has faint alternating vertical shading (every other
+   sector slightly tinted) so you can SEE the sector boundaries directly,
+   not just infer them from the tick numbers.
+   RIGHT EYE: TEMPORAL ~ S3 (3 o'clock), NASAL ~ S9 (9 o'clock)
+   LEFT  EYE: NASAL ~ S3 (3 o'clock), TEMPORAL ~ S9 (9 o'clock)
 
-  Y AXIS (vertical) = RADIAL DEPTH IN RINGS:
-    Top    = Ring 0  (R0) = innermost, adjacent to pupil
-    Bottom = Ring 11 (R11) = outermost, adjacent to limbus
-    Formula: ring = (y_pixel - 50) / 300 * 12
+2) RING GROUP (vertical/depth position, printed as a name in the left
+   margin, with a bold horizontal line at every group boundary):
+     IPB     — thin band, innermost, touching the pupil edge
+     STOM    — thin band, just below IPB (stomach ring)
+     ANW     — the wavy collarette band (autonomic nerve wreath)
+     ORG_IN  — inner third of the organ zone (largest band on the strip)
+     ORG_MID — middle third of the organ zone
+     ORG_OUT — outer third of the organ zone
+     LYM     — thin band near the outer edge (lymphatic)
+     SCU     — outermost thin band, touching the limbus (skin/scurf)
+   ORG_IN / ORG_MID / ORG_OUT together hold nearly all digestion,
+   metabolism and endocrine organs and are drawn much taller than the
+   other bands specifically so you can tell them apart reliably — use
+   that space; do not default to "ORG_MID" out of uncertainty when the
+   finding is visibly closer to one of the bold boundary lines.
+   Faint thin gray lines and small "R4"/"R5" etc. labels inside ORG_IN/
+   ORG_MID/ORG_OUT/ANW are an OPTIONAL finer reference only — the ring
+   GROUP is what matters; do not strain for individual-ring precision.
 
-RING GROUP ZONES:
-  R0        = IPB  (iris pupillary border)
-  R1        = STOM (stomach ring)
-  R2-R3     = ANW  (autonomic nerve wreath / collarette)
-  R4-R9     = ORG  (organ zone)
-  R10       = LYM  (lymphatic zone)
-  R11       = SCU  (scurf rim / skin zone)
-
-NASAL / TEMPORAL ORIENTATION:
-  RIGHT EYE: TEMPORAL ~ minute 15 (3 o'clock), NASAL ~ minute 45 (9 o'clock)
-  LEFT  EYE: NASAL ~ minute 15 (3 o'clock), TEMPORAL ~ minute 45 (9 o'clock)
+WHEN A FINDING SPANS MORE THAN ONE SECTOR OR BAND:
+  - Report sectorRange as [firstSector, lastSector] (e.g. [3,5]).
+  - sectorRange must never wrap past S12→S1: if a finding straddles the
+    12 o'clock line, split it into two findings, one ending at S12 and
+    one starting at S1.
+  - If a finding clearly crosses ring-group boundaries, set ringGroup to
+    where it starts and ringGroupEnd to where it ends (omit ringGroupEnd
+    if it stays within one band).
 
 HOW FEATURES APPEAR:
   CONCENTRIC (rings, ANW, bands) = HORIZONTAL stripes left-to-right
   RADIAL (furrows, clefts)       = VERTICAL dark stripes top-to-bottom
   POINT/LOCAL (lacunae, crypts)  = Discrete patches
   EYELID-MASKED areas            = White/blank bands (DO NOT report findings there)
-
-CRITICAL: Read minute from TOP TICK LABELS, ring from LEFT R-LABELS.
-DO NOT use atan2, radial distance, or any circular-geometry formula.
 ================================================================================`;
+
+// =====================================================================
+// SECTOR / RING-GROUP → CANONICAL NUMERIC RANGE (deterministic, no AI math)
+// =====================================================================
+const RING_GROUP_ORDER = ['IPB', 'STOM', 'ANW', 'ORG_IN', 'ORG_MID', 'ORG_OUT', 'LYM', 'SCU'];
+const RING_GROUP_RANGE = {
+  IPB: [0, 0], STOM: [1, 1], ANW: [2, 3],
+  ORG_IN: [4, 5], ORG_MID: [6, 7], ORG_OUT: [8, 9],
+  LYM: [10, 10], SCU: [11, 11],
+};
+
+function sectorRangeToMinuteRange(sectorRange) {
+  if (!Array.isArray(sectorRange) || sectorRange.length !== 2) return [0, 5];
+  const [s0, s1] = sectorRange;
+  const a = Math.min(Math.max(1, s0 | 0), 12);
+  const b = Math.min(Math.max(1, s1 | 0), 12);
+  return [(Math.min(a, b) - 1) * 5, Math.max(a, b) * 5];
+}
+
+function ringGroupToRingRange(ringGroup, ringGroupEnd) {
+  const start = RING_GROUP_RANGE[ringGroup] || RING_GROUP_RANGE.ORG_MID;
+  const end = ringGroupEnd ? (RING_GROUP_RANGE[ringGroupEnd] || start) : start;
+  return [Math.min(start[0], end[0]), Math.max(start[1], end[1])];
+}
+
+// Deterministically converts a detection's sectorRange/ringGroup labels
+// (which the AI reads directly off the printed image) into the canonical
+// minuteRange/ringRange used for zone matching downstream — keeps that
+// arithmetic out of the model's hands entirely.
+function canonicalizeFinding(f) {
+  return {
+    ...f,
+    minuteRange: sectorRangeToMinuteRange(f.sectorRange),
+    ringRange: ringGroupToRingRange(f.ringGroup, f.ringGroupEnd),
+  };
+}
+
+function postProcessDetection(json) {
+  if (!json || json.error) return json;
+  const out = { ...json };
+  if (Array.isArray(out.structural)) out.structural = out.structural.map(canonicalizeFinding);
+  if (Array.isArray(out.pigment)) out.pigment = out.pigment.map(canonicalizeFinding);
+  if (Array.isArray(out.verified_structural)) out.verified_structural = out.verified_structural.map(canonicalizeFinding);
+  if (Array.isArray(out.verified_pigment)) out.verified_pigment = out.verified_pigment.map(canonicalizeFinding);
+  if (out.collarette?.segments) {
+    out.collarette = {
+      ...out.collarette,
+      segments: out.collarette.segments.map(s => ({ ...s, minuteRange: sectorRangeToMinuteRange([s.seg, s.seg]) })),
+    };
+  }
+  if (out.collarette_verified?.segments) {
+    out.collarette_verified = {
+      ...out.collarette_verified,
+      segments: out.collarette_verified.segments.map(s => ({ ...s, minuteRange: sectorRangeToMinuteRange([s.seg, s.seg]) })),
+    };
+  }
+  return out;
+}
 
 // =====================================================================
 // IRIDOLOGY ZONE MAP (v9)
@@ -497,10 +614,133 @@ const MAP_V9 = [
   { id: 'L-spine-lumb',     side: 'L',   mins: [27, 35], rings: [8, 10],  organ_bg: 'Гръбначен стълб (лумбален)', system_bg: 'Опорно-двигателна' },
 ];
 
+// Zones with direct relevance to metabolism / endocrine function / digestion
+// — the requested analytical focus. These get deeper scrutiny in detection
+// and heavier weight in the report; everything else in MAP_V9 still exists
+// and is still detected/reported, just without the extra emphasis.
+const PRIORITY_ZONE_IDS = new Set([
+  'ANY-stomach', 'ANY-sm-intest', 'ANY-ANW', 'ANY-LYM',
+  'R-thyroid', 'R-liver', 'R-gallbladder', 'R-colon-asc', 'R-pancreas', 'R-kidney', 'R-adrenal',
+  'L-thyroid', 'L-colon-desc', 'L-pancreas', 'L-kidney', 'L-adrenal',
+]);
+MAP_V9.forEach(z => { z.priority = PRIORITY_ZONE_IDS.has(z.id); });
+
+// =====================================================================
+// ZONE MATCHING (deterministic, in code — never asked of the model)
+// =====================================================================
+// Matching a finding to a zone is interval arithmetic, so it belongs here rather
+// than in a prompt. Just as important: this map is heavily overlapping — for the
+// right eye, 314 of 720 (minute x ring) cells are claimed by two or more zones and
+// some by six. Any single "winning" organ is therefore partly an artefact of the
+// tie-break rule, so matching reports the runners-up and flags ambiguity instead
+// of presenting one confident organ name.
+
+function rangeOverlap(a, b) {
+  return Math.min(a[1], b[1]) - Math.max(a[0], b[0]);
+}
+
+function scoreZone(minuteRange, ringRange, zone) {
+  const mOv = rangeOverlap(minuteRange, zone.mins);
+  const rOv = rangeOverlap(ringRange, zone.rings);
+  if (mOv < 0 || rOv < 0) return null;
+
+  const zoneArea = (zone.mins[1] - zone.mins[0] + 1) * (zone.rings[1] - zone.rings[0] + 1);
+  const overlapArea = (mOv + 1) * (rOv + 1);
+  // Reward real overlap, prefer the more specific (smaller) zone, and prefer a
+  // side-specific zone over an "ANY" catch-all covering the whole iris.
+  const specificity = 1 / Math.sqrt(zoneArea);
+  const sideBonus = zone.side === 'ANY' ? 0.85 : 1.0;
+  return { score: overlapArea * specificity * sideBonus, overlapArea, zoneArea };
+}
+
+/**
+ * Rank the zones a finding could belong to.
+ * Returns { primary, alternates, ambiguous, systemLabel } — ambiguous when the
+ * runner-up is nearly as good a fit, which on this map is common.
+ */
+function matchZones(minuteRange, ringRange, side) {
+  const scored = [];
+  for (const zone of MAP_V9) {
+    if (zone.side !== side && zone.side !== 'ANY') continue;
+    const s = scoreZone(minuteRange, ringRange, zone);
+    if (s) scored.push({ zone, ...s });
+  }
+  if (!scored.length) {
+    return { primary: null, alternates: [], ambiguous: false, systemLabel: null };
+  }
+
+  scored.sort((a, b) => (b.score - a.score) || (a.zoneArea - b.zoneArea));
+  const top = scored[0];
+  const runnerUp = scored[1];
+  const ambiguous = !!runnerUp && runnerUp.score >= 0.75 * top.score;
+
+  return {
+    primary: {
+      id: top.zone.id,
+      organ_bg: top.zone.organ_bg,
+      system_bg: top.zone.system_bg,
+      priority: !!top.zone.priority,
+    },
+    alternates: scored.slice(1, 4).map(s => ({
+      id: s.zone.id, organ_bg: s.zone.organ_bg, system_bg: s.zone.system_bg,
+    })),
+    ambiguous,
+    // What we can state without overclaiming when several organs fit equally.
+    systemLabel: top.zone.system_bg,
+  };
+}
+
+/** Attach zone matches to every finding of a verified detection payload. */
+function attachZones(json, side) {
+  if (!json || json.error) return json;
+  const withZone = (f) => {
+    if (!f || !f.minuteRange || !f.ringRange) return f;
+    const m = matchZones(f.minuteRange, f.ringRange, side);
+    return { ...f, zone: m.primary, zoneAlternates: m.alternates, zoneAmbiguous: m.ambiguous };
+  };
+  const out = { ...json };
+  if (Array.isArray(out.verified_structural)) out.verified_structural = out.verified_structural.map(withZone);
+  if (Array.isArray(out.verified_pigment)) out.verified_pigment = out.verified_pigment.map(withZone);
+
+  // Rebuild the zone summary from the matches rather than trusting the model's.
+  const counts = new Map();
+  for (const f of [...(out.verified_structural || []), ...(out.verified_pigment || [])]) {
+    if (!f.zone) continue;
+    const key = f.zone.id;
+    const entry = counts.get(key) || {
+      zoneId: key, organ_bg: f.zone.organ_bg, system_bg: f.zone.system_bg,
+      priority: f.zone.priority, evidenceCount: 0, ambiguousCount: 0, types: {},
+    };
+    entry.evidenceCount++;
+    if (f.zoneAmbiguous) entry.ambiguousCount++;
+    entry.types[f.type] = (entry.types[f.type] || 0) + 1;
+    counts.set(key, entry);
+  }
+  out.zoneSummary = Array.from(counts.values())
+    .map(e => ({
+      zoneId: e.zoneId, organ_bg: e.organ_bg, system_bg: e.system_bg,
+      priority: e.priority, evidenceCount: e.evidenceCount,
+      ambiguousCount: e.ambiguousCount,
+      topTypes: Object.entries(e.types).map(([t, c]) => `${t}:${c}`),
+    }))
+    .sort((a, b) => b.evidenceCount - a.evidenceCount);
+
+  return out;
+}
+
 // =====================================================================
 // CALL 1: FULL DETECTION (vision + image)
 // Combines: STEP1 geo + STEP2A structural + STEP2B pigment + STEP2B_ANW collarette
 // =====================================================================
+function priorityZoneHint(side) {
+  const zones = MAP_V9.filter(z => z.priority && (z.side === side || z.side === 'ANY'));
+  const toSectors = (mins) => [Math.floor(mins[0] / 5) + 1, Math.ceil(mins[1] / 5)];
+  return zones.map(z => {
+    const [s0, s1] = toSectors(z.mins);
+    return `  - ${z.organ_bg} (${z.system_bg}): around S${s0}-S${s1}`;
+  }).join('\n');
+}
+
 function promptCall1_Detect(side, imageHash) {
   return `${IMAGE_FORMAT}
 
@@ -539,6 +779,16 @@ QUALITY GATE — if ANY of these is true, return error:
 → return: {"error":{"stage":"CALL1","code":"LOW_QUALITY","message":"<reason>","canRetry":true}}
 
 ================================================================================
+PRIORITY FOCUS: METABOLISM / ENDOCRINE / DIGESTION
+================================================================================
+This analysis feeds a nutrition plan. Give EXTRA scrutiny to sectors overlapping
+these organs — look twice, use the full ORG_IN/ORG_MID/ORG_OUT height to tell
+them apart, and don't merge distinct findings there for convenience:
+${priorityZoneHint(side)}
+All other zones on the strip are still detected and reported normally, just
+without this extra pass.
+
+================================================================================
 PART B: STRUCTURAL DETECTION
 ================================================================================
 
@@ -546,7 +796,10 @@ Detect STRUCTURAL findings only (NO organ names, NO diagnosis):
   lacuna | crypt | giant_lacuna | atrophic_area | collarette_defect_lesion |
   radial_furrow | deep_radial_cleft | transversal_fiber | structural_asymmetry
 
-For each: type, minuteRange [start, end], ringRange [start, end], size (xs/s/m/l),
+For each: type, sectorRange [firstSector, lastSector] (1-12, read from the
+          printed S1..S12 labels), ringGroup (read from the printed left-margin
+          band name: IPB|STOM|ANW|ORG_IN|ORG_MID|ORG_OUT|LYM|SCU), ringGroupEnd
+          (only if it visibly crosses into another band), size (xs/s/m/l),
           notes (<=60 chars), confidence (0.0-1.0).
 
 IGNORE: White/blank eyelid-masked bands, glare/specular patches.
@@ -554,19 +807,19 @@ IGNORE: White/blank eyelid-masked bands, glare/specular patches.
 DEFINITIONS (how features appear in the UNWRAPPED STRIP):
 - lacuna: horizontally elongated oval gap breaking fiber flow, lighter interior
 - crypt: small deep dark triangular/rhomboid hole with sharp edges
-- giant_lacuna: very large lacuna ≥8 minutes wide
+- giant_lacuna: very large lacuna spanning 2+ sectors
 - atrophic_area: absent/flattened fiber texture (NOT glare, NOT white band — dull, texture-free)
-- collarette_defect_lesion: notch/break on ANW (rings R2-R3)
-- radial_furrow: narrow VERTICAL dark stripe (1-3 min wide) from ANW outward
-- deep_radial_cleft: wider VERTICAL dark stripe (4-8 min wide), deeper than furrow
+- collarette_defect_lesion: notch/break on the ANW band
+- radial_furrow: narrow VERTICAL dark stripe running from ANW outward, within 1 sector wide
+- deep_radial_cleft: wider VERTICAL dark stripe (spans part of 2+ sectors), deeper than furrow
 - transversal_fiber: DIAGONAL line crossing radial fibers at an angle
 - structural_asymmetry: visible fiber density/texture difference between strip halves
 
 RANGE RULES:
-- minuteRange NEVER wraps. Split [57,3] into [57,59] + [0,3] as two findings.
-- ringRange: start ≤ end always.
-- Point-like findings: width ≥ ±1 minute (min width = 2).
-- Very wide (>20 min OR >3 rings): confidence -= 0.15; drop if <0.55.
+- sectorRange NEVER wraps past S12→S1: split a straddling finding into two
+  (one ending at S12, one starting at S1).
+- Point-like findings still get a sectorRange of at least 1 sector wide (e.g. [4,4]).
+- Findings spanning 4+ sectors: confidence -= 0.15; drop if <0.55 (likely overbroad).
 
 ================================================================================
 PART C: PIGMENT & RING DETECTION
@@ -596,24 +849,27 @@ Assess GLOBAL TRIAD:
 PART D: ANW / COLLARETTE CONTOUR PROFILING
 ================================================================================
 
-The collarette (ANW) is the wavy band visible in rows R2-R3 (~50-100px from strip top).
-Divide into 12 segments of 5 minutes each:
-  Seg 1: min 0-5, Seg 2: min 5-10, ..., Seg 12: min 55-60
+The collarette (ANW) is the wavy band with its own labeled row on the strip.
+Divide into the same 12 sectors as everywhere else (seg = sector number, 1-12).
 
 For EACH visible segment:
-- position: high (near R2, contracted) | mid (R2-R3, normal) | low (near R3+, expanded)
-- ringCenter: approximate ring position as decimal (e.g., 2.3, 2.8, 3.1)
+- position: high (near the ANW/ORG_IN boundary, contracted) |
+            mid (centered in the ANW band, normal) |
+            low (near the STOM/ANW boundary, expanded)
+  (read this directly from where the band sits relative to its bold boundary
+  lines — do not estimate a decimal ring number)
 - shape: normal | expanded | contracted | broken | notched | ballooning | flattened
-- thickness: thin (<15px/<0.6 rings) | normal (15-30px) | thick (>30px/>1.2 rings)
+- thickness: thin | normal | thick (relative to the band's own printed height)
 - integrity: sharp | fuzzy | absent
 - If segment is masked (white/eyelid): visible=false
 
 ANW_status overall: expanded | contracted | broken | normal | mixed | unclear
 
-List ANW defects: breaks, notches, ballooning with minuteRange + ringRange + notes.
+List ANW defects: breaks, notches, ballooning with sectorRange + notes
+(ringGroup is always "ANW" for these).
 
-contourSummary: avgRingCenter, minRingCenter, maxRingCenter, expandedSegments[],
-contractedSegments[], brokenSegments[], overallIntegrity (good|moderate|poor).
+contourSummary: expandedSegments[], contractedSegments[], brokenSegments[]
+(seg numbers), overallIntegrity (good|moderate|poor).
 
 ================================================================================
 OUTPUT — JSON ONLY — EXACT STRUCTURE:
@@ -631,14 +887,14 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
     "usableUpperIris": true,
     "refRay15Usable": true,
     "invalidRegions": [
-      {"type":"specular|eyelid_band","minuteRange":[0,0],"ringRange":[0,0]}
+      {"type":"specular|eyelid_band","sectorRange":[0,0],"ringGroup":"IPB|STOM|ANW|ORG_IN|ORG_MID|ORG_OUT|LYM|SCU"}
     ]
   },
   "structural": [
-    {"type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","notes":"<=60","confidence":0.0}
+    {"type":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"size":"xs|s|m|l","notes":"<=60","confidence":0.0}
   ],
   "pigment": [
-    {"type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","notes":"<=60","confidence":0.0}
+    {"type":"...","subtype":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"severity":"low|medium|high","notes":"<=60","confidence":0.0}
   ],
   "global": {
     "constitution": "LYM|HEM|BIL|unclear",
@@ -649,15 +905,12 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
     "ANW_status": "expanded|contracted|broken|normal|mixed|unclear",
     "confidence": 0.0,
     "segments": [
-      {"seg":1,"minuteRange":[0,5],"visible":true,"position":"high|mid|low","ringCenter":2.5,"shape":"normal|expanded|contracted|broken|notched|ballooning|flattened","thickness":"thin|normal|thick","integrity":"sharp|fuzzy|absent","confidence":0.0}
+      {"seg":1,"visible":true,"position":"high|mid|low","shape":"normal|expanded|contracted|broken|notched|ballooning|flattened","thickness":"thin|normal|thick","integrity":"sharp|fuzzy|absent","confidence":0.0}
     ],
     "defects": [
-      {"type":"break|notch|ballooning|lesion|pigment_on_ANW","minuteRange":[0,0],"ringRange":[2,3],"notes":"<=60","confidence":0.0}
+      {"type":"break|notch|ballooning|lesion|pigment_on_ANW","sectorRange":[0,0],"notes":"<=60","confidence":0.0}
     ],
     "contourSummary": {
-      "avgRingCenter": 2.5,
-      "minRingCenter": 2.0,
-      "maxRingCenter": 3.0,
       "expandedSegments": [],
       "contractedSegments": [],
       "brokenSegments": [],
@@ -698,19 +951,26 @@ find missed features, and ensure precision.
 PART A: VERIFICATION — Re-examine image against CALL1 findings
 ================================================================================
 
+Note: CALL1_RESULTS below already has canonical minuteRange/ringRange filled
+in (computed deterministically from CALL1's sector/ringGroup picks) — use
+those for zone-matching in Part C. For your own re-classification here, keep
+reading sectorRange/ringGroup from the printed labels, not pixel positions.
+
 For EACH structural finding from CALL1:
-1. Look at the stated minuteRange + ringRange in the actual image.
+1. Look at the stated sector(s) + ring group in the actual image.
 2. CONFIRM the finding exists (keep with same or adjusted confidence).
-3. CORRECT minuteRange/ringRange if they seem off after careful re-examination.
+3. CORRECT sectorRange/ringGroup if they seem off after careful re-examination.
 4. REJECT if the area is actually white/blank (eyelid mask), glare, or normal tissue.
    Move rejected findings to "dropped" with reason.
 
 For EACH pigment finding from CALL1:
 1. Re-examine the actual image area.
-2. CONFIRM, CORRECT ranges, or REJECT with reason.
+2. CONFIRM, CORRECT sectorRange/ringGroup, or REJECT with reason.
 
 CHECK FOR MISSED FINDINGS:
 - Carefully scan the entire strip for features that CALL1 may have missed.
+- Give the priority sectors listed in CALL1's prompt (metabolism/endocrine/
+  digestion organs) a second dedicated look before finalizing.
 - Add any newly detected findings to the verified lists.
 
 ================================================================================
@@ -722,46 +982,41 @@ CONTRADICTION RULES:
 2) pigment_spot vs lacuna/crypt: overlapping → keep structural; drop pigment.
 3) lymphatic_rosary vs brushfield_like_spots: same area → keep rosary if chain/arc of discrete nodules.
 4) Specular contamination: drop findings overlapping invalidRegions >25%.
-5) collarette_defect_lesion vs ANW defects: same minuteRange → merge, keep ANW defect detail.
+5) collarette_defect_lesion vs ANW defects: same sector(s) → merge, keep ANW defect detail.
 
-DEDUP/MERGE: Same type + minute overlap >60% AND ring overlap >60% → merge (union ranges, max confidence).
+DEDUP/MERGE: Same type + same sector(s) + same ringGroup → merge (union sectorRange, max confidence).
 
 RANGE NORMALIZATION:
-- Clamp minutes 0..59, rings 0..11.
-- minuteRange NEVER wraps: split if start > end.
-- Very wide (>20 min OR >3 rings) → confidence -= 0.15; drop if <0.55.
-- usableUpperIris=false: findings in [57..59] or [0..3] → confidence -= 0.10.
+- Clamp sectors 1..12, ringGroup to one of the 8 named bands.
+- sectorRange NEVER wraps past S12→S1: split if it would.
+- usableUpperIris=false: findings in S12 or S1 → confidence -= 0.10.
 
 COLLARETTE:
-- collarette ringRange MUST be [2, 3]. Clamp if inconsistent, confidence -= 0.20.
-- Cross-check ANW status: if structural defects contradict, note the discrepancy.
+- collarette ringGroup is always "ANW". Cross-check ANW status: if structural
+  defects contradict, note the discrepancy.
 
 ================================================================================
-PART C: ZONE MAPPING — Match findings to anatomical zones
+PART C: (NOT YOUR JOB) — ZONE MAPPING IS DONE IN CODE
 ================================================================================
 
-Match each VERIFIED finding to the most specific zone from MAP_V9 below using
-(side + minuteRange + ringRange overlap):
+Do NOT map findings to organs, and do NOT output any organ or zone name here.
+Anatomical mapping is pure interval arithmetic and is performed deterministically
+after this call, from the sector/ring-group labels you report. Your only job is
+to describe WHAT you see and WHERE it sits on the printed grid, accurately.
 
-${JSON.stringify(MAP_V9.filter(z => z.side === side || z.side === 'ANY'))}
-
-MATCH RULE: zone matches if:
-- zone.side == "${side}" or zone.side == "ANY"
-- finding.minuteRange overlaps zone.mins (max(starts) ≤ min(ends))
-- finding.ringRange overlaps zone.rings
-
-TIE-BREAK: prefer side-specific over ANY, prefer smaller zone area.
+Reporting an organ name here would mean re-deriving numeric coordinates by eye,
+which is exactly the error this pipeline is designed to avoid.
 
 ================================================================================
 PART D: PROFILE BUILD — Derive health axes and channels
 ================================================================================
 
-From the verified and mapped findings, compute:
+From the verified findings, compute (WITHOUT naming organs — see Part C):
 1. Constitution/disposition/diathesis from global traits.
 2. ANW profile from collarette segments.
-3. Elimination channels: gut_ANW → kidney → lymph → skin (status + evidence).
+3. Ring-group load: for each ring group with findings, how loaded it looks
+   (normal | attention | concern) plus the finding ids that justify it.
 4. Axes: stress (0-100), digestive (0-100), immune (0-100).
-5. Hypotheses: preventive health claims citing specific findings + zones.
 
 ================================================================================
 OUTPUT — JSON ONLY — EXACT STRUCTURE:
@@ -771,22 +1026,21 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
   "imgId": "${imageHash}",
   "side": "${side}",
   "verified_structural": [
-    {"fid":"S1","type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","notes":"<=60","confidence":0.0,"zone":{"id":"...","organ_bg":"...","system_bg":"..."},"status":"confirmed|corrected|new"}
+    {"fid":"S1","type":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"size":"xs|s|m|l","notes":"<=60","confidence":0.0,"status":"confirmed|corrected|new"}
   ],
   "verified_pigment": [
-    {"fid":"P1","type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","notes":"<=60","confidence":0.0,"zone":{"id":"...","organ_bg":"...","system_bg":"..."},"status":"confirmed|corrected|new"}
+    {"fid":"P1","type":"...","subtype":"...","sectorRange":[0,0],"ringGroup":"...","ringGroupEnd":null,"severity":"low|medium|high","notes":"<=60","confidence":0.0,"status":"confirmed|corrected|new"}
   ],
   "collarette_verified": {
     "ANW_status": "expanded|contracted|broken|normal|mixed|unclear",
     "confidence": 0.0,
     "segments": [
-      {"seg":1,"minuteRange":[0,5],"visible":true,"position":"high|mid|low","ringCenter":2.5,"shape":"normal|expanded|contracted|broken|notched|ballooning|flattened","thickness":"thin|normal|thick","integrity":"sharp|fuzzy|absent","confidence":0.0}
+      {"seg":1,"visible":true,"position":"high|mid|low","shape":"normal|expanded|contracted|broken|notched|ballooning|flattened","thickness":"thin|normal|thick","integrity":"sharp|fuzzy|absent","confidence":0.0}
     ],
     "defects": [
-      {"type":"break|notch|ballooning|lesion","minuteRange":[0,0],"ringRange":[2,3],"notes":"<=60","confidence":0.0}
+      {"type":"break|notch|ballooning|lesion","sectorRange":[0,0],"notes":"<=60","confidence":0.0}
     ],
     "contourSummary": {
-      "avgRingCenter":2.5,"minRingCenter":2.0,"maxRingCenter":3.0,
       "expandedSegments":[],"contractedSegments":[],"brokenSegments":[],
       "overallIntegrity":"good|moderate|poor"
     }
@@ -797,16 +1051,10 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
     "diathesis": [{"code":"HAC|LRS|LIP|DYS","confidence":0.0}],
     "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
   },
-  "zoneSummary": [
-    {"zoneId":"...","organ_bg":"...","system_bg":"...","evidenceCount":0,"topTypes":["type:count"]}
-  ],
   "profile": {
     "axesScore": {"stress0_100":0,"digestive0_100":0,"immune0_100":0},
-    "elimChannels": [
-      {"channel":"gut_ANW","status":"normal|attention|concern","evidence":[{"fid":"S1","zoneId":"..."}]},
-      {"channel":"kidney","status":"normal|attention|concern","evidence":[]},
-      {"channel":"lymph","status":"normal|attention|concern","evidence":[]},
-      {"channel":"skin_scu","status":"normal|attention|concern","evidence":[]}
+    "ringGroupLoad": [
+      {"ringGroup":"STOM|ANW|ORG_IN|ORG_MID|ORG_OUT|LYM|SCU","status":"normal|attention|concern","evidence":[{"fid":"S1"}]}
     ],
     "ANW_profile": {
       "overallIntegrity":"good|moderate|poor",
@@ -817,7 +1065,7 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
     }
   },
   "dropped": [
-    {"type":"...","minuteRange":[0,0],"reason":"contradiction|specular|eyelid_band|too_wide|low_confidence|duplicate|false_positive"}
+    {"type":"...","sectorRange":[0,0],"reason":"contradiction|specular|eyelid_band|too_wide|low_confidence|duplicate|false_positive"}
   ],
   "warnings": ["<=60 chars"]
 }
@@ -830,29 +1078,86 @@ FAILSAFE:
 // CALL 3: REPORT GENERATION (text only — no image)
 // Combines: STEP5 Bulgarian report
 // =====================================================================
-function promptCall3_Report(side, imageHash, call1, call2, questionnaire) {
+function promptCall3_Report(imageHash, analysed, questionnaire) {
   const q = questionnaire || {};
-  return `IRIS PIPELINE — CALL3: Bulgarian Report Generation (v11)
+  const eyesPayload = analysed.map(a => ({
+    side: a.side,
+    captureQuality: a.quality || {},
+    verified: a.call2,
+  }));
+  const sideList = analysed.map(a => (a.side === 'R' ? 'дясно' : 'ляво')).join(' и ');
 
-ROLE: iris_frontend_report_generator_bg_v11
+  return `IRIS PIPELINE — CALL3: Bulgarian Report Generation (v12)
+
+ROLE: iris_frontend_report_generator_bg_v12
 MODE: strict_json_only (NO image — text synthesis only)
 
 INPUTS:
-  DETECTION = ${JSON.stringify(call1)}
-  VERIFIED  = ${JSON.stringify(call2)}
+  EYES = ${JSON.stringify(eyesPayload)}
   QUESTIONNAIRE = ${JSON.stringify(q)}
-  SIDE = ${side}
   IMG_ID = ${imageHash}
 
-PREREQ: If VERIFIED.error exists → return error JSON.
+You are writing ONE report covering ${analysed.length === 2 ? 'BOTH eyes' : `the ${sideList} eye only`}.
 
-You have VERIFIED detection results (CALL2 output). Synthesize them into the
-final Bulgarian-language UI report. This is a TEXT-ONLY call — no image analysis.
+PREREQ: If every entry in EYES contains an error → return error JSON.
+
+BOTH EYES, ONE REPORT:
+- In this method the right eye reads the right side of the body and the left eye
+  the left, and several zones exist in only one eye. So do NOT average the eyes
+  together and do NOT prefer one: report each eye's zones separately, and let the
+  combined evidence inform the single shared nutrition plan and system scores.
+- If only one eye is present, say so in dataQuality.limitations.
+- Each eye carries its own captureQuality; weight a poorly captured eye less and
+  say so rather than treating both as equally reliable.
 
 ================================================================================
+NOT MEDICAL — MANDATORY FRAMING:
+- This is a wellness-style, non-diagnostic iris reading used only to bias a
+  nutrition plan. It is NOT a medical diagnosis and iridology organ-mapping
+  is not scientifically validated. Every output MUST include the disclaimer
+  field below verbatim (translated meaning, Bulgarian wording may vary
+  slightly but must state clearly: not a medical diagnosis, informational/
+  wellness use only, consult a doctor for real symptoms).
+
+ROLE OF THE IRIS IN THIS REPORT (read carefully — this drives everything):
+- The iris findings are a SUPPORTING signal, not the basis of the advice. The
+  nutrition plan is built primarily from the QUESTIONNAIRE, which is real
+  self-reported data. Iris findings only shift emphasis between options that
+  are already appropriate for that person.
+- Never invent a restriction, a deficiency, or a condition from the iris alone.
+- If QUESTIONNAIRE is sparse, say so in dataQuality and keep the plan
+  correspondingly general — do NOT compensate by leaning harder on the iris.
+
 CORE TRUTH RULE:
-- ORGAN and SYSTEM names MUST come from VERIFIED.zoneSummary and VERIFIED.verified_structural / verified_pigment zone fields.
-- The 12 UI zones below are DISPLAY BUCKETS ONLY.
+- ORGAN and SYSTEM names MUST come ONLY from the zone fields already attached
+  to each finding (zone.organ_bg / zone.system_bg). These were computed in code.
+  Do NOT infer an organ from coordinates yourself and do NOT introduce any organ
+  name that is not present in VERIFIED.
+- The 12 UI zones are DISPLAY BUCKETS ONLY and correspond 1:1 to sectors
+  S1..S12 already used throughout detection (Zone N = Sector N).
+
+AMBIGUITY IS EXPLICIT — RESPECT IT:
+- Each finding carries zoneAmbiguous and zoneAlternates. The underlying map
+  overlaps heavily: many positions are claimed by several organs at once, so a
+  single organ name is often partly an artefact of the tie-break.
+- If zoneAmbiguous is true → use the general system label (zone.system_bg), NOT
+  the specific organ name. You may mention the alternatives together in the
+  findings text (e.g. "черен дроб или жлъчен мехур"), never as a single verdict.
+- If zoneAmbiguous is false AND zone.priority is true (metabolism / endocrine /
+  digestion — the requested focus) → use the SPECIFIC organ name.
+- If zoneAmbiguous is false but zone.priority is false → prefer the system
+  label; a specific organ is allowed only when evidence is strong (confidence
+  >= 0.75).
+
+CAPTURE QUALITY GOVERNS CONFIDENCE (per eye):
+- Each eye's captureQuality carries how good that photo actually was (score
+  0-100, visibleFraction, and rollCorrected — whether an anatomical rotation
+  reference could be established from the eye corners).
+- If rollCorrected is false for an eye, the angular position of every finding in
+  THAT eye may be off by up to a sector. For that eye: prefer system labels over
+  organ names throughout, and say so in dataQuality.
+- If an eye's score < 55 or visibleFraction < 0.7, keep its zone statuses
+  conservative (avoid "concern" unless the questionnaire independently supports it).
 
 VALIDATION PRIORITY (cross-reference with QUESTIONNAIRE):
   1) ВИСОК — потвърдено от въпросника (highest weight)
@@ -873,69 +1178,97 @@ MINUTE-TO-ZONE CONVERSION:
   Zone 11 ("10-11ч"): minutes 50-55  → degrees 300-330
   Zone 12 ("11-12ч"): minutes 55-60  → degrees 330-360
 
-HOW TO FILL EACH ZONE:
-- Collect VERIFIED findings whose center minute falls in the zone's range.
+HOW TO FILL EACH ZONE (do this once PER EYE, using only that eye's findings):
+- Collect that eye's verified findings whose center minute falls in the zone range.
 - Determine dominant organ/system by: weight = confidence + severity_bonus(lacuna=+0.1, crypt=+0.15, cleft=+0.15)
 - status: concern (strong evidence + HIGH questionnaire) | attention (medium evidence) | normal (little/no evidence)
 - findings: brief Bulgarian summary ≤ 60 chars
 
-ARTIFACTS (2-5 strongest from VERIFIED):
+ARTIFACTS (2-5 strongest per eye):
   Prioritize: lacuna, crypt, radial_furrow, deep_radial_cleft, nerve_rings,
               pigment_spot, sodium_ring, scurf_rim, lymphatic_rosary, ANW defects
   location format: clock string (minute 0→"12:00", 5→"1:00", 10→"2:00", 15→"3:00", etc.)
 
-COLLARETTE PROFILE (from VERIFIED.collarette_verified + VERIFIED.profile.ANW_profile):
-  - status: Bulgarian label
-  - integrity: Bulgarian
-  - 12 segments with shape/position in Bulgarian
-  - defects with clock location
-  - clinicalNote ≤ 120 chars Bulgarian
+COLLARETTE (per eye, from that eye's collarette_verified + profile.ANW_profile):
+  - status and integrity as short Bulgarian labels
+  - note ≤ 120 chars Bulgarian
 
 SYSTEM SCORES (always exactly 6):
   Храносмилателна | Имунна | Нервна | Сърдечно-съдова | Детоксикация | Ендокринна
   score 0-100 based on VERIFIED.profile.axesScore + zone evidence
   description ≤ 60 chars Bulgarian
+  Give Храносмилателна/Детоксикация/Ендокринна the most detailed, evidence-
+  specific descriptions since those map to the priority focus area; the
+  other three can stay more general.
+
+NUTRITION PLAN — THIS IS THE MAIN DELIVERABLE:
+  Build a concrete, usable daily plan, not a list of slogans.
+  - Source of truth order: (1) QUESTIONNAIRE — goals, complaints, dietary
+    habits, allergies, medications, activity, sleep, age/sex/BMI; (2) general
+    sound nutrition practice; (3) iris priority-zone findings, for emphasis only.
+  - dayPlan: 4-5 entries (Закуска, Обяд, Следобедна закуска, Вечеря, по избор
+    Преди сън). Each: meal (Bulgarian label), suggestion (concrete foods, a real
+    portion idea, ≤140 chars), rationale (≤100 chars, WHY for THIS person).
+  - emphasize / reduce: 3-6 each. Each has item (≤40) and reason (≤100). The
+    reason must reference the questionnaire where possible; only cite an iris
+    finding when it genuinely adds something, and then name the SYSTEM, not a
+    specific organ, unless that finding was unambiguous and priority.
+  - hydration: one concrete line (≤120).
+  - weeklyHabits: 2-4 small, checkable habits (≤100 each).
+  - cautions: allergies, medications, and anything the questionnaire flags that
+    should override a generic suggestion. If allergies/medications are present in
+    QUESTIONNAIRE they MUST be reflected here. Empty array only if truly nothing.
+  - notForYou: 1-3 explicit statements of what this plan does NOT address and
+    when to see a professional (≤120 each).
+
+DATA QUALITY (honest self-assessment, shown to the user):
+  - questionnaireCompleteness: "пълен|частичен|минимален"
+  - irisContribution: "съществен|поддържащ|ограничен" — how much the iris
+    actually shaped the plan. With poor capture quality or an unreliable
+    rotation reference this must be "ограничен".
+  - limitations: 1-3 short Bulgarian sentences naming the real limits of this
+    particular analysis (sparse questionnaire, occluded iris, no roll reference,
+    ambiguous zone attribution).
 
 ADVICE (Bulgarian, all values ≤ 120 chars):
-  priorities: 3-6 bullets | nutrition.focus: 3-6 | nutrition.limit: 3-6
-  lifestyle.sleep: 2-4 | lifestyle.stress: 2-4 | lifestyle.activity: 2-4
-  followUp: 2-5 bullets
+  priorities: 3-6 bullets | lifestyle.sleep: 2-4 | lifestyle.stress: 2-4
+  lifestyle.activity: 2-4 | followUp: 2-5 bullets
 
 ================================================================================
 OUTPUT — JSON ONLY — EXACT STRUCTURE:
 ================================================================================
 
 {
+  "disclaimer": "Този анализ не е медицинска диагноза - ориентировъчно, уелнес приложение с цел хранителен план. При реални оплаквания се консултирайте с лекар.",
   "analysis": {
-    "zones": [
-      {"id":1,"name":"12-1ч","organ":"<БГ>","status":"normal|attention|concern","findings":"<=60 БГ","angle":[0,30]},
-      {"id":2,"name":"1-2ч","organ":"...","status":"...","findings":"<=60","angle":[30,60]},
-      {"id":3,"name":"2-3ч","organ":"...","status":"...","findings":"<=60","angle":[60,90]},
-      {"id":4,"name":"3-4ч","organ":"...","status":"...","findings":"<=60","angle":[90,120]},
-      {"id":5,"name":"4-5ч","organ":"...","status":"...","findings":"<=60","angle":[120,150]},
-      {"id":6,"name":"5-6ч","organ":"...","status":"...","findings":"<=60","angle":[150,180]},
-      {"id":7,"name":"6-7ч","organ":"...","status":"...","findings":"<=60","angle":[180,210]},
-      {"id":8,"name":"7-8ч","organ":"...","status":"...","findings":"<=60","angle":[210,240]},
-      {"id":9,"name":"8-9ч","organ":"...","status":"...","findings":"<=60","angle":[240,270]},
-      {"id":10,"name":"9-10ч","organ":"...","status":"...","findings":"<=60","angle":[270,300]},
-      {"id":11,"name":"10-11ч","organ":"...","status":"...","findings":"<=60","angle":[300,330]},
-      {"id":12,"name":"11-12ч","organ":"...","status":"...","findings":"<=60","angle":[330,360]}
+    "eyes": [
+      {
+        "side": "R",
+        "zones": [
+          {"id":1,"name":"12-1ч","organ":"<БГ>","status":"normal|attention|concern","findings":"<=60 БГ","angle":[0,30]},
+          {"id":2,"name":"1-2ч","organ":"...","status":"...","findings":"<=60","angle":[30,60]},
+          {"id":3,"name":"2-3ч","organ":"...","status":"...","findings":"<=60","angle":[60,90]},
+          {"id":4,"name":"3-4ч","organ":"...","status":"...","findings":"<=60","angle":[90,120]},
+          {"id":5,"name":"4-5ч","organ":"...","status":"...","findings":"<=60","angle":[120,150]},
+          {"id":6,"name":"5-6ч","organ":"...","status":"...","findings":"<=60","angle":[150,180]},
+          {"id":7,"name":"6-7ч","organ":"...","status":"...","findings":"<=60","angle":[180,210]},
+          {"id":8,"name":"7-8ч","organ":"...","status":"...","findings":"<=60","angle":[210,240]},
+          {"id":9,"name":"8-9ч","organ":"...","status":"...","findings":"<=60","angle":[240,270]},
+          {"id":10,"name":"9-10ч","organ":"...","status":"...","findings":"<=60","angle":[270,300]},
+          {"id":11,"name":"10-11ч","organ":"...","status":"...","findings":"<=60","angle":[300,330]},
+          {"id":12,"name":"11-12ч","organ":"...","status":"...","findings":"<=60","angle":[330,360]}
+        ],
+        "artifacts": [
+          {"type":"тип_БГ","location":"3:00-4:00","description":"<=60 БГ","severity":"low|medium|high"}
+        ],
+        "collarette": {
+          "status": "разширена|свита|прекъсната|нормална|смесена|неясна",
+          "integrity": "добра|умерена|слаба",
+          "note": "<=120 chars кратка интерпретация"
+        }
+      }
     ],
-    "artifacts": [
-      {"type":"тип_БГ","location":"3:00-4:00","description":"<=60 БГ","severity":"low|medium|high"}
-    ],
-    "collaretteProfile": {
-      "status": "разширена|свита|прекъсната|нормална|смесена|неясна",
-      "integrity": "добра|умерена|слаба",
-      "segments": [
-        {"seg":1,"clock":"12-1ч","shape":"нормална|разширена|свита|прекъсната|вдлъбната|балониране|заличена","position":"висока|средна|ниска","visible":true}
-      ],
-      "defects": [
-        {"type":"прекъсване|вдлъбнатина|балониране|лезия","location":"3:00-4:00","description":"<=60"}
-      ],
-      "clinicalNote": "<=120 chars кратка интерпретация"
-    },
-    "overallHealth": 75,
+    "findingsIndex": 75,
     "systemScores": [
       {"system":"Храносмилателна","score":80,"description":"<=60"},
       {"system":"Имунна","score":80,"description":"<=60"},
@@ -945,30 +1278,31 @@ OUTPUT — JSON ONLY — EXACT STRUCTURE:
       {"system":"Ендокринна","score":80,"description":"<=60"}
     ]
   },
+  "nutritionPlan": {
+    "summary": "<=200 chars БГ - какъв е подходът за този човек и защо",
+    "dayPlan": [
+      {"meal":"Закуска","suggestion":"<=140 конкретни храни и порция","rationale":"<=100 защо за този човек"}
+    ],
+    "emphasize": [{"item":"<=40","reason":"<=100"}],
+    "reduce": [{"item":"<=40","reason":"<=100"}],
+    "hydration": "<=120",
+    "weeklyHabits": ["<=100"],
+    "cautions": ["<=120 - алергии, лекарства, важни ограничения"],
+    "notForYou": ["<=120 - какво този план НЕ покрива"]
+  },
+  "dataQuality": {
+    "questionnaireCompleteness": "пълен|частичен|минимален",
+    "irisContribution": "съществен|поддържащ|ограничен",
+    "limitations": ["<=140 БГ"]
+  },
   "advice": {
     "priorities": ["<=120 chars БГ"],
-    "nutrition": {"focus": ["<=120"], "limit": ["<=120"]},
     "lifestyle": {"sleep": ["<=120"], "stress": ["<=120"], "activity": ["<=120"]},
     "followUp": ["<=120"]
   },
   "pipeline": {
-    "quality": {
-      "score0_100": 0,
-      "focus": "good|med|poor",
-      "glare": "none|low|med|high",
-      "occlusion": "none|low|med|high"
-    },
-    "global": {
-      "constitution": "LYM|HEM|BIL|unclear",
-      "disposition": "SILK|LINEN|BURLAP|unclear",
-      "diathesis": [{"code":"HAC|LRS|LIP|DYS","confidence":0.0}],
-      "ANW_status": "expanded|contracted|broken|normal|mixed|unclear"
-    },
-    "structuralFindings": [
-      {"fid":"S1","type":"...","minuteRange":[0,0],"ringRange":[0,0],"size":"xs|s|m|l","zone":"zone_id","organ_bg":"...","confidence":0.0}
-    ],
-    "pigmentFindings": [
-      {"fid":"P1","type":"...","subtype":"...","minuteRange":[0,0],"ringRange":[0,0],"severity":"low|medium|high","zone":"zone_id","organ_bg":"...","confidence":0.0}
+    "global": [
+      {"side":"R","constitution":"LYM|HEM|BIL|unclear","disposition":"SILK|LINEN|BURLAP|unclear","ANW_status":"expanded|contracted|broken|normal|mixed|unclear"}
     ]
   }
 }
@@ -979,10 +1313,17 @@ RULES:
 - No double quotes inside string values
 - findings ≤ 60 chars, descriptions ≤ 60 chars, advice ≤ 120 chars
 - severity: low|medium|high
-- Always output exactly 12 zones, exactly 6 systemScores
-- 2-5 artifacts (strongest findings)
-- organ names MUST come from the zone MAP
+- One entry in "analysis.eyes" per eye present in EYES, each with exactly 12 zones
+- Exactly 6 systemScores, shared across both eyes
+- 2-5 artifacts per eye (strongest findings)
+- organ names MUST come from the zone fields already attached to the findings
+- "findingsIndex" is how much the iris shows, NOT a health score. Do not present
+  it as a measure of health anywhere in the text.
 - IGNORE white/blank eyelid-masked areas
+- "disclaimer" field is REQUIRED and must state this is not a medical diagnosis
+- "nutritionPlan" is the main deliverable and must be concrete and usable
+- "dataQuality" must be honest, including when the analysis is weak
+- Never state a specific organ for a finding whose zoneAmbiguous is true
 
 FAILSAFE:
 {"error":{"stage":"CALL3","code":"PREREQ_FAIL|FORMAT_FAIL","message":"<reason>","canRetry":true}}`;
