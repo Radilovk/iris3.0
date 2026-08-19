@@ -56,6 +56,10 @@ def test_spec_conformance():
     check('JS pupil.darkFractions matches spec', f'darkFractions: [{fracs}]' in js)
     check('JS eyelid.pupilMarginPx matches spec',
           f"pupilMarginPx: {spec['eyelid']['pupilMarginPx']}" in js)
+    check('JS validity.maxPupilRingOcclusion matches spec',
+          f"maxPupilRingOcclusion: {spec['validity']['maxPupilRingOcclusion']}" in js)
+    check('JS carries the pupil-visibility message',
+          'PUPIL_NOT_CLEAR' in js and 'зеница, видима изцяло' in js)
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +164,38 @@ def test_eyelid_masking():
         check('most of the iris survives', vis > 0.55, f'visible {vis:.2f}')
 
     # A half-closed eye must be refused rather than analysed as if fully visible.
-    # Known limit: below roughly lid_cut 0.32 the lid edge reaches the pupil rim,
-    # the lid search band collapses, and no fit is produced — such a capture keeps
-    # lidsDetected=false and therefore scores low, but is not hard-rejected.
     for lid_cut in (0.5, 0.35):
         res2 = app.analyze_eye(synth_eye(lid_cut=lid_cut), 'R')
         check(f'half-closed eye (lid_cut={lid_cut}) rejected', not res2['ok'],
               res2.get('code', 'accepted'))
+
+
+def test_pupil_visibility():
+    """
+    A lid closing onto the pupil rim defeats lid fitting entirely, so the
+    lid-based occlusion measure reads zero. An independent check of the ring
+    around the pupil must catch it and ask for a clearer photo of the pupil.
+    """
+    print('\nPUPIL VISIBILITY (independent of eyelid fitting)')
+    for lid_cut in (0.30, 0.25, 0.20):
+        res = app.analyze_eye(synth_eye(lid_cut=lid_cut), 'R')
+        check(f'lid over pupil (lid_cut={lid_cut}) rejected', not res['ok'],
+              res.get('code', 'accepted'))
+        if not res['ok']:
+            check(f'  reason names pupil visibility (lid_cut={lid_cut})',
+                  res['code'] == 'PUPIL_NOT_CLEAR', res['code'])
+            check(f'  message asks for a new photo (lid_cut={lid_cut})',
+                  'нова снимка' in res['message'])
+
+    # And it must not fire on a perfectly good eye.
+    for lid_cut in (0.9, 0.75):
+        res = app.analyze_eye(synth_eye(lid_cut=lid_cut), 'R')
+        check(f'clear eye (lid_cut={lid_cut}) still accepted', res['ok'],
+              res.get('code', ''))
+        if res['ok']:
+            check(f'  pupil ring reads as unobstructed (lid_cut={lid_cut})',
+                  res['geometry']['pupilRingOcclusion'] < 0.2,
+                  f"occlusion {res['geometry']['pupilRingOcclusion']:.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +241,7 @@ if __name__ == '__main__':
     test_sector_roundtrip()
     test_roll_matters()
     test_eyelid_masking()
+    test_pupil_visibility()
     test_validity_gate()
     test_determinism()
 

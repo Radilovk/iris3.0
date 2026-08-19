@@ -53,6 +53,8 @@ REJECT_MESSAGES = {
     'IRIS_OUT_OF_FRAME': 'Окото не се побира в кадъра. Центрирайте го и снимайте отново.',
     'RATIO_IMPLAUSIBLE': 'Зеницата и ирисът не бяха разделени коректно. Опитайте при по-различна светлина.',
     'TOO_OCCLUDED': 'Клепачите закриват твърде голяма част от ириса. Отворете окото по-широко.',
+    'PUPIL_NOT_CLEAR': 'Зеницата не се вижда достатъчно ясно — клепачът или миглите я закриват. '
+                       'Направете нова снимка с широко отворено око и зеница, видима изцяло.',
 }
 
 
@@ -308,6 +310,65 @@ def fit_eyelids(gray, cx, cy, ir, pupil_r, seed=0):
     return coef_u, coef_l
 
 
+def pupil_clearance_occlusion(gray, cx, cy, pr, ir):
+    """
+    Fraction of the ring just outside the pupil that does not look like iris.
+
+    This does not depend on the eyelid fit, which is exactly why it exists: when a
+    lid closes far enough to reach the pupil rim, the lid search band collapses and
+    no curve can be fitted at all, so the lid-based occlusion measure reports zero
+    and a nearly shut eye would sail through the gate. Here the iris appearance is
+    sampled near the horizontal meridians (which lids practically never reach) and
+    used as the reference, then compared against samples straight above and below
+    the pupil, where a lid must be if it is covering it.
+    """
+    if ir <= pr + 8:
+        return 1.0
+
+    h, w = gray.shape[:2]
+    g = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    def sample(deg, frac):
+        rad = np.deg2rad(deg)
+        r = pr + frac * (ir - pr)
+        x = int(round(cx + r * np.cos(rad)))
+        y = int(round(cy + r * np.sin(rad)))
+        if 0 <= x < w and 0 <= y < h:
+            return float(g[y, x])
+        return None
+
+    # Reference: the iris either side of the pupil, horizontally.
+    ref_vals = []
+    for deg in list(range(-32, 33, 4)) + list(range(148, 213, 4)):
+        for frac in (0.20, 0.35, 0.50):
+            v = sample(deg, frac)
+            if v is not None:
+                ref_vals.append(v)
+    if len(ref_vals) < 12:
+        return 1.0
+
+    ref = float(np.median(ref_vals))
+    mad = float(np.median(np.abs(np.array(ref_vals) - ref)))
+    # Generous tolerance: normal irises vary a lot sector to sector, and a false
+    # rejection costs the user a retake for nothing.
+    tol = max(45.0, 3.0 * 1.4826 * mad)
+
+    occluded = 0
+    total = 0
+    for deg in list(range(62, 119, 4)) + list(range(242, 299, 4)):
+        vals = [sample(deg, f) for f in (0.15, 0.30, 0.45)]
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            continue
+        total += 1
+        if abs(float(np.median(vals)) - ref) > tol:
+            occluded += 1
+
+    if total == 0:
+        return 1.0
+    return occluded / float(total)
+
+
 def estimate_roll(coef_u, coef_l, cx, ir):
     """
     Camera/head roll from the canthi (eye corners), taken as the intersections of
@@ -445,7 +506,8 @@ def unwrap_iris_fast(img, mask, px, py, pr, ir, roll_rad=0.0):
 # ==========================================
 # 6. VALIDITY GATE
 # ==========================================
-def validate_geometry(pupil, iris, frame_w, frame_h, masked_fraction=None):
+def validate_geometry(pupil, iris, frame_w, frame_h, masked_fraction=None,
+                      pupil_occlusion=None):
     """
     Refuse to produce a strip we cannot trust. A confidently mislabelled analysis
     is worse than asking for another photo, because every organ attribution
@@ -474,6 +536,8 @@ def validate_geometry(pupil, iris, frame_w, frame_h, masked_fraction=None):
 
     if masked_fraction is not None and masked_fraction > v['maxMaskedFraction']:
         reasons.append('TOO_OCCLUDED')
+    if pupil_occlusion is not None and pupil_occlusion > v['maxPupilRingOcclusion']:
+        reasons.append('PUPIL_NOT_CLEAR')
 
     return {'ok': len(reasons) == 0, 'reasons': reasons}
 
@@ -622,6 +686,8 @@ def analyze_eye(img, side):
                 'message': REJECT_MESSAGES.get(code, 'Снимката не е подходяща за анализ.'),
                 'reasons': reasons}
 
+    pupil_occlusion = pupil_clearance_occlusion(gray, pupil['x'], pupil['y'], pupil['r'], iris['r'])
+
     coef_u, coef_l = fit_eyelids(enhanced, pupil['x'], pupil['y'], iris['r'], pupil['r'])
     roll = estimate_roll(coef_u, coef_l, pupil['x'], iris['r'])
     mask, true_occluded = build_mask(h, w, pupil['x'], pupil['y'], iris['r'], coef_u, coef_l)
@@ -631,7 +697,7 @@ def analyze_eye(img, side):
 
     # Judge on the worse of what we masked and what the lids actually cover.
     occlusion = max(masked_fraction, true_occluded)
-    post = validate_geometry(pupil, iris, w, h, occlusion)
+    post = validate_geometry(pupil, iris, w, h, occlusion, pupil_occlusion)
     if not post['ok']:
         code = post['reasons'][0]
         return {'ok': False, 'code': code,
@@ -660,6 +726,7 @@ def analyze_eye(img, side):
             'rollDeg': float(np.rad2deg(roll['roll_rad'])),
             'rollSource': roll['source'],
             'lidsDetected': coef_u is not None and coef_l is not None,
+            'pupilRingOcclusion': round(pupil_occlusion, 3),
         },
         'quality': {
             'irisConfidence': iris['confidence'],

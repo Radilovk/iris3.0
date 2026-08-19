@@ -70,6 +70,7 @@
     "maxPupilIrisRatio": 0.75,
     "maxMaskedFraction": 0.45,
     "minIrisRadiusPx": 40,
+    "maxPupilRingOcclusion": 0.5,
     "edgeMarginFactor": 0.9
   }
 }

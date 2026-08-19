@@ -38,7 +38,7 @@
     iris: { minRadiusFactor: 2.2, maxRadiusFactor: 7.5, step: 2, minGradient: 5.0, goodGradient: 25.0 },
     eyelid: { pupilMarginPx: 5, baseGradientThreshold: 25.0, ransacThreshold: 4.0, ransacIters: 450, maxCutFraction: 0.25, minPoints: 40, minFilteredPoints: 30 },
     roll: { maxRollDeg: 25.0, minCornerSpanFactor: 1.5 },
-    validity: { minPupilIrisRatio: 0.15, maxPupilIrisRatio: 0.75, maxMaskedFraction: 0.45, minIrisRadiusPx: 40, edgeMarginFactor: 0.9 },
+    validity: { minPupilIrisRatio: 0.15, maxPupilIrisRatio: 0.75, maxMaskedFraction: 0.45, minIrisRadiusPx: 40, maxPupilRingOcclusion: 0.5, edgeMarginFactor: 0.9 },
   };
 
   const DEST_CONTENT_H = SPEC.ringGroups.reduce((s, g) => s + g.destHeight, 0);
@@ -54,6 +54,8 @@
     IRIS_OUT_OF_FRAME: 'Окото не се побира в кадъра. Центрирайте го и снимайте отново.',
     RATIO_IMPLAUSIBLE: 'Зеницата и ирисът не бяха разделени коректно. Опитайте при по-различна светлина.',
     TOO_OCCLUDED: 'Клепачите закриват твърде голяма част от ириса. Отворете окото по-широко.',
+    PUPIL_NOT_CLEAR: 'Зеницата не се вижда достатъчно ясно — клепачът или миглите я закриват. '
+      + 'Направете нова снимка с широко отворено око и зеница, видима изцяло.',
   };
 
   // ---------------------------------------------------------------- utilities
@@ -373,6 +375,70 @@
   }
 
   /**
+   * Fraction of the ring just outside the pupil that does not look like iris.
+   *
+   * This does not depend on the eyelid fit, which is exactly why it exists: when a
+   * lid closes far enough to reach the pupil rim, the lid search band collapses and
+   * no curve can be fitted at all, so the lid-based occlusion measure reports zero
+   * and a nearly shut eye would sail through the gate. Here the iris appearance is
+   * sampled near the horizontal meridians (which lids practically never reach) and
+   * used as the reference, then compared against samples straight above and below
+   * the pupil, where a lid must be if it is covering it.
+   */
+  function pupilClearanceOcclusion(grayMat, cx, cy, pr, ir) {
+    if (ir <= pr + 8) return 1;
+
+    const blurred = new cv.Mat();
+    cv.GaussianBlur(grayMat, blurred, new cv.Size(5, 5), 0);
+    const data = blurred.data;
+    const w = blurred.cols, h = blurred.rows;
+
+    const sample = (deg, frac) => {
+      const rad = (deg * Math.PI) / 180;
+      const r = pr + frac * (ir - pr);
+      const x = Math.round(cx + r * Math.cos(rad));
+      const y = Math.round(cy + r * Math.sin(rad));
+      if (x >= 0 && x < w && y >= 0 && y < h) return data[y * w + x];
+      return null;
+    };
+    const median = (a) => {
+      const s = Array.from(a).sort((p, q) => p - q);
+      return s[Math.floor(s.length / 2)];
+    };
+
+    // Reference: the iris either side of the pupil, horizontally.
+    const ref = [];
+    for (const range of [[-32, 32], [148, 212]]) {
+      for (let deg = range[0]; deg <= range[1]; deg += 4) {
+        for (const frac of [0.20, 0.35, 0.50]) {
+          const v = sample(deg, frac);
+          if (v !== null) ref.push(v);
+        }
+      }
+    }
+    if (ref.length < 12) { blurred.delete(); return 1; }
+
+    const refMed = median(ref);
+    const mad = median(ref.map(v => Math.abs(v - refMed)));
+    // Generous tolerance: normal irises vary a lot sector to sector, and a false
+    // rejection costs the user a retake for nothing.
+    const tol = Math.max(45, 3 * 1.4826 * mad);
+
+    let occluded = 0, total = 0;
+    for (const range of [[62, 118], [242, 298]]) {
+      for (let deg = range[0]; deg <= range[1]; deg += 4) {
+        const vals = [0.15, 0.30, 0.45].map(f => sample(deg, f)).filter(v => v !== null);
+        if (!vals.length) continue;
+        total++;
+        if (Math.abs(median(vals) - refMed) > tol) occluded++;
+      }
+    }
+
+    blurred.delete();
+    return total ? occluded / total : 1;
+  }
+
+  /**
    * Camera/head roll from the canthi (eye corners), taken as the intersections of
    * the two lid curves. This is what makes minute 0 mean *anatomical* up rather
    * than "up in the photo" — without it a routine phone tilt rotated the whole
@@ -624,7 +690,7 @@
    * is worse than asking for another photo, because every organ attribution
    * downstream inherits the error invisibly.
    */
-  function validate(pupil, iris, frameW, frameH, maskedFraction) {
+  function validate(pupil, iris, frameW, frameH, maskedFraction, pupilOcclusion) {
     const v = SPEC.validity;
     const reasons = [];
 
@@ -643,6 +709,7 @@
       }
     }
     if (maskedFraction !== undefined && maskedFraction > v.maxMaskedFraction) reasons.push('TOO_OCCLUDED');
+    if (pupilOcclusion !== undefined && pupilOcclusion > v.maxPupilRingOcclusion) reasons.push('PUPIL_NOT_CLEAR');
 
     return { ok: reasons.length === 0, reasons: reasons };
   }
@@ -681,6 +748,8 @@
       return { ok: false, code: code, message: REJECT_MESSAGES[code] || 'Снимката не е подходяща за анализ.', reasons: reasons };
     }
 
+    const pupilOcclusion = pupilClearanceOcclusion(gray, pupil.x, pupil.y, pupil.r, iris.r);
+
     const lids = fitEyelids(enhanced, pupil.x, pupil.y, iris.r, pupil.r);
     const roll = estimateRoll(lids.coefUpper, lids.coefLower, pupil.x, iris.r);
     const masked = buildMask(srcMat.cols, srcMat.rows, pupil.x, pupil.y, iris.r, lids.coefUpper, lids.coefLower);
@@ -689,7 +758,7 @@
 
     // Judge on the worse of what we masked and what the lids actually cover.
     const occlusion = Math.max(un.maskedFraction, masked.trueOccluded);
-    const post = validate(pupil, iris, srcMat.cols, srcMat.rows, occlusion);
+    const post = validate(pupil, iris, srcMat.cols, srcMat.rows, occlusion, pupilOcclusion);
     if (!post.ok) {
       gray.delete(); enhanced.delete(); un.mat.delete();
       const code = post.reasons[0];
@@ -709,6 +778,7 @@
         rollSource: roll.source,
         corners: roll.corners,
         lidsDetected: !!(lids.coefUpper && lids.coefLower),
+        pupilRingOcclusion: Math.round(pupilOcclusion * 1000) / 1000,
       },
       quality: {
         // Honest composite: edge strength, pupil roundness, visible area, and
@@ -739,6 +809,7 @@
     findIrisOuter: findIrisOuter,
     fitEyelids: fitEyelids,
     estimateRoll: estimateRoll,
+    pupilClearanceOcclusion: pupilClearanceOcclusion,
     buildMask: buildMask,
     unwrap: unwrap,
     renderGrid: renderGrid,
