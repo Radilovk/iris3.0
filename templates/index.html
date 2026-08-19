@@ -783,9 +783,28 @@
             
             const analysis = report.analysis;
             const advice = report.advice || {};
-            
+            const plan = report.nutritionPlan || {};
+            const dq = report.dataQuality || {};
+
             let html = `<h3>🔬 AI Иридологичен Анализ</h3>`;
-            
+
+            // The nutrition plan is the deliverable; the iris findings support it.
+            if (plan.summary || (plan.dayPlan && plan.dayPlan.length)) {
+                html += `<div class="advice-section"><h4>🍽️ Хранителен план</h4>`;
+                if (plan.summary) html += `<p>${escapeHtml(plan.summary)}</p>`;
+                if (plan.dayPlan && plan.dayPlan.length) {
+                    html += `<ul>${plan.dayPlan.map(m =>
+                        `<li><strong>${escapeHtml(m.meal || '')}:</strong> ${escapeHtml(m.suggestion || '')}` +
+                        (m.rationale ? `<br><em>${escapeHtml(m.rationale)}</em>` : '') + `</li>`).join('')}</ul>`;
+                }
+                if (plan.hydration) html += `<p><strong>Хидратация:</strong> ${escapeHtml(plan.hydration)}</p>`;
+                html += `</div>`;
+            }
+            if (plan.cautions && plan.cautions.length) {
+                html += `<div class="advice-section"><h4>⚠️ Внимание</h4>
+                    <ul>${plan.cautions.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>`;
+            }
+
             // Overall Health Score
             if (analysis.overallHealth !== undefined) {
                 html += `
@@ -882,13 +901,15 @@
                     `;
                 }
                 
-                if (advice.nutrition) {
-                    html += `<div class="advice-section"><h4>🥗 Хранене</h4>`;
-                    if (advice.nutrition.focus && advice.nutrition.focus.length > 0) {
-                        html += `<p><strong>Фокус:</strong></p><ul>${advice.nutrition.focus.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>`;
+                if (plan.emphasize || plan.reduce) {
+                    html += `<div class="advice-section"><h4>🥗 Акценти в храненето</h4>`;
+                    if (plan.emphasize && plan.emphasize.length > 0) {
+                        html += `<p><strong>Наблегнете на:</strong></p><ul>${plan.emphasize.map(f =>
+                            `<li>${escapeHtml(f.item)}${f.reason ? ' — ' + escapeHtml(f.reason) : ''}</li>`).join('')}</ul>`;
                     }
-                    if (advice.nutrition.limit && advice.nutrition.limit.length > 0) {
-                        html += `<p><strong>Ограничете:</strong></p><ul>${advice.nutrition.limit.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>`;
+                    if (plan.reduce && plan.reduce.length > 0) {
+                        html += `<p><strong>Ограничете:</strong></p><ul>${plan.reduce.map(l =>
+                            `<li>${escapeHtml(l.item)}${l.reason ? ' — ' + escapeHtml(l.reason) : ''}</li>`).join('')}</ul>`;
                     }
                     html += `</div>`;
                 }
@@ -915,8 +936,22 @@
                         </div>
                     `;
                 }
-                
+
                 html += `</div>`;
+            }
+
+            // Shown, not buried: what this particular analysis could not support.
+            const limits = (dq.limitations || []).concat(plan.notForYou || []);
+            if (limits.length) {
+                html += `<div class="advice-section"><h4>ℹ️ Какво този анализ не може</h4>
+                    <ul>${limits.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>`;
+                if (dq.irisContribution) {
+                    html += `<p><em>Принос на ириса: ${escapeHtml(dq.irisContribution)}</em></p>`;
+                }
+                html += `</div>`;
+            }
+            if (report.disclaimer) {
+                html += `<p style="font-size:.85rem;opacity:.75;margin-top:14px">${escapeHtml(report.disclaimer)}</p>`;
             }
             
             container.innerHTML = html;
