@@ -1034,49 +1034,85 @@
             return result;
         }
         
+        // Ring-group bands: [name, srcRowStart, srcRowEnd, destHeightPx]
+        // Source rows are within the raw 300px-tall unwrap (25px/ring).
+        // Dest heights give the metabolism/endocrine/digestion-relevant ORG
+        // band (rings 4-9, split into 3 sub-bands) far more vertical pixel
+        // budget than the old uniform 25px/ring layout, so the AI has
+        // enough resolution to tell sub-bands apart instead of guessing.
+        // MUST stay in sync with RING_GROUPS in app.py.
+        const RING_GROUPS = [
+            ['IPB',     0,  25,  20],
+            ['STOM',   25,  50,  20],
+            ['ANW',    50, 100,  60],
+            ['ORG_IN', 100, 150, 140],
+            ['ORG_MID', 150, 200, 140],
+            ['ORG_OUT', 200, 250, 140],
+            ['LYM',    250, 275,  40],
+            ['SCU',    275, 300,  40],
+        ];
+        const RING_SUBLINES = { ANW: [2, 3], ORG_IN: [4, 5], ORG_MID: [6, 7], ORG_OUT: [8, 9] };
+        const DEST_CONTENT_H = RING_GROUPS.reduce((s, g) => s + g[3], 0); // 600
+
         // Draw grid map with labels (matching app.py draw_ai_grid_map_expanded)
         function drawGridMap(unwrapped, side) {
-            const canvasWidth = 1280;
-            const canvasHeight = 390;
-            const paddingLeft = 60;
-            const paddingTop = 50;
             const imgWidth = 1200;
-            const imgHeight = 300;
-            
+            const imgHeight = DEST_CONTENT_H; // 600
+            const paddingLeft = 100;
+            const paddingTop = 70;
+            const paddingBottom = 40;
+            const paddingRight = 20;
+            const canvasWidth = imgWidth + paddingLeft + paddingRight;
+            const canvasHeight = imgHeight + paddingTop + paddingBottom;
+
             // Create canvas
             const canvas = document.getElementById('processingCanvas');
             canvas.width = canvasWidth;
             canvas.height = canvasHeight;
             const ctx = canvas.getContext('2d');
-            
+
             // White background (matching app.py canvas)
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-            
-            // Draw unwrapped image — get pixels from cv.Mat
-            // First render to a temp canvas at unwrapped size
+
+            // Render the raw 1200x300 unwrap onto a source canvas, then
+            // redistribute each ring-group band into its taller/shorter
+            // destination band (non-linear vertical resample).
             const tmpCanvas = document.createElement('canvas');
             tmpCanvas.width = unwrapped.cols;
             tmpCanvas.height = unwrapped.rows;
             cv.imshow(tmpCanvas, unwrapped);
-            
-            // Draw the unwrapped image into the padded area, scaling to 1200×300
-            ctx.drawImage(tmpCanvas, 0, 0, unwrapped.cols, unwrapped.rows,
-                          paddingLeft, paddingTop, imgWidth, imgHeight);
-            
-            // Draw grid lines (light gray, matching app.py)
+
+            let yDst = paddingTop;
+            for (const [, s0, s1, dh] of RING_GROUPS) {
+                ctx.drawImage(tmpCanvas, 0, s0, unwrapped.cols, s1 - s0,
+                              paddingLeft, yDst, imgWidth, dh);
+                yDst += dh;
+            }
+
+            // Alternate light tint per 5-minute sector (12 sectors = the 12
+            // UI zones) so the AI can read "which column" visually instead
+            // of estimating a pixel offset. Kept subtle to not obscure
+            // iris texture.
+            const nSectors = 12;
+            const sectorW = imgWidth / nSectors;
+            ctx.fillStyle = 'rgba(180, 180, 180, 0.12)';
+            for (let sec = 0; sec < nSectors; sec++) {
+                if (sec % 2 === 1) {
+                    ctx.fillRect(paddingLeft + sec * sectorW, paddingTop, sectorW, imgHeight);
+                }
+            }
+
+            // Vertical minute gridlines
             ctx.strokeStyle = 'rgb(200, 200, 200)';
             ctx.lineWidth = 1;
-            
-            // Vertical lines (minutes)
             for (let m = 0; m <= 60; m += 5) {
                 const x = paddingLeft + (m / 60) * imgWidth;
                 ctx.beginPath();
                 ctx.moveTo(x, paddingTop);
                 ctx.lineTo(x, paddingTop + imgHeight);
                 ctx.stroke();
-                
-                // Tick mark above grid
+
                 ctx.strokeStyle = 'rgb(0, 0, 0)';
                 ctx.beginPath();
                 ctx.moveTo(x, paddingTop - 5);
@@ -1084,31 +1120,40 @@
                 ctx.stroke();
                 ctx.strokeStyle = 'rgb(200, 200, 200)';
             }
-            
-            // Horizontal lines (rings)
-            ctx.strokeStyle = 'rgb(240, 240, 240)';
-            for (let r = 0; r <= 12; r++) {
-                const y = paddingTop + (r / 12) * imgHeight;
+
+            // Ring-group boundary lines (bold) + thin sub-lines for the
+            // 2-ring bands (ANW, ORG_IN, ORG_MID, ORG_OUT)
+            let y = paddingTop;
+            for (const [name, s0, s1, dh] of RING_GROUPS) {
+                ctx.strokeStyle = 'rgb(0, 60, 140)';
+                ctx.lineWidth = 2;
                 ctx.beginPath();
                 ctx.moveTo(paddingLeft, y);
                 ctx.lineTo(paddingLeft + imgWidth, y);
                 ctx.stroke();
-                
-                // Tick mark to the left
-                if (r < 12) {
-                    ctx.strokeStyle = 'rgb(0, 0, 0)';
+
+                if (RING_SUBLINES[name]) {
+                    const yy = y + dh / 2;
+                    ctx.strokeStyle = 'rgb(200, 200, 200)';
+                    ctx.lineWidth = 1;
                     ctx.beginPath();
-                    ctx.moveTo(paddingLeft - 5, y);
-                    ctx.lineTo(paddingLeft, y);
+                    ctx.moveTo(paddingLeft, yy);
+                    ctx.lineTo(paddingLeft + imgWidth, yy);
                     ctx.stroke();
-                    ctx.strokeStyle = 'rgb(240, 240, 240)';
                 }
+                y += dh;
             }
-            
-            // Draw labels (black text, matching app.py)
+            ctx.strokeStyle = 'rgb(0, 60, 140)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(paddingLeft, y);
+            ctx.lineTo(paddingLeft + imgWidth, y);
+            ctx.stroke();
+
+            // Labels
             ctx.fillStyle = '#000000';
             ctx.font = '10px sans-serif';
-            
+
             // Minute labels at top
             for (let m = 0; m <= 60; m += 5) {
                 const x = paddingLeft + (m / 60) * imgWidth;
@@ -1116,31 +1161,52 @@
                 const metrics = ctx.measureText(text);
                 ctx.fillText(text, x - metrics.width / 2, paddingTop - 10);
             }
-            
-            // Ring labels on left
-            ctx.font = '12px sans-serif';
-            for (let r = 0; r < 12; r++) {
-                const y = paddingTop + (r / 12) * imgHeight + 15;
-                ctx.fillText('R' + r, 5, y);
+
+            // Sector labels (S1..S12) above the minute ticks
+            ctx.fillStyle = 'rgb(150, 0, 0)';
+            ctx.font = '10px sans-serif';
+            for (let sec = 0; sec < nSectors; sec++) {
+                const xc = paddingLeft + (sec + 0.5) * sectorW;
+                const text = 'S' + (sec + 1);
+                const metrics = ctx.measureText(text);
+                ctx.fillText(text, xc - metrics.width / 2, paddingTop - 30);
             }
-            
+
+            // Ring-group name labels on the left + optional R-numbers
+            ctx.fillStyle = '#000000';
+            ctx.font = '11px sans-serif';
+            y = paddingTop;
+            for (const [name, s0, s1, dh] of RING_GROUPS) {
+                ctx.fillText(name, 5, y + dh / 2 + 4);
+                if (RING_SUBLINES[name]) {
+                    const [rFirst, rSecond] = RING_SUBLINES[name];
+                    ctx.font = '9px sans-serif';
+                    ctx.fillStyle = 'rgb(90, 90, 90)';
+                    ctx.fillText('R' + rFirst, paddingLeft - 32, y + dh / 4 + 4);
+                    ctx.fillText('R' + rSecond, paddingLeft - 32, y + dh / 2 + dh / 4 + 4);
+                    ctx.fillStyle = '#000000';
+                    ctx.font = '11px sans-serif';
+                }
+                y += dh;
+            }
+
             // Eye label (bottom left)
             ctx.font = 'bold 16px sans-serif';
             ctx.fillStyle = '#000000';
             ctx.fillText(side === 'R' ? 'RIGHT EYE' : 'LEFT EYE', paddingLeft, canvasHeight - 10);
-            
+
             // NASAL / TEMPORAL labels (matching app.py)
             const nm = side === 'R' ? 45 : 15;
             const tm = side === 'R' ? 15 : 45;
             const nx = paddingLeft + (nm / 60) * imgWidth;
             const tx = paddingLeft + (tm / 60) * imgWidth;
-            
+
             ctx.font = '12px sans-serif';
             ctx.fillStyle = 'rgb(0, 0, 255)';
             ctx.fillText('^ NASAL', nx - 30, canvasHeight - 10);
             ctx.fillStyle = 'rgb(100, 100, 100)';
             ctx.fillText('^ TEMPORAL', tx - 40, canvasHeight - 10);
-            
+
             // Return as Mat
             const result = cv.imread(canvas);
             return result;

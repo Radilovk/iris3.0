@@ -304,25 +304,78 @@ def unwrap_iris_fast(img, px, py, pr, ir):
 # ==========================================
 # 6. DRAW MAP
 # ==========================================
+# Ring-group bands: (name, src_row_start, src_row_end, dest_height_px)
+# Source rows are within the raw 300px-tall unwrap (25px/ring, uniform).
+# Dest heights give the metabolism/endocrine/digestion-relevant ORG band
+# (rings 4-9, split into 3 sub-bands) far more vertical pixel budget than
+# the thin uniform 25px/ring layout used to provide, so the AI has enough
+# resolution to tell sub-bands apart instead of guessing.
+RING_GROUPS = [
+    ("IPB",     0,  25,  20),
+    ("STOM",   25,  50,  20),
+    ("ANW",    50, 100,  60),
+    ("ORG_IN", 100, 150, 140),
+    ("ORG_MID", 150, 200, 140),
+    ("ORG_OUT", 200, 250, 140),
+    ("LYM",    250, 275,  40),
+    ("SCU",    275, 300,  40),
+]
+DEST_CONTENT_H = sum(g[3] for g in RING_GROUPS)  # 600
+# Sub-ring boundaries (for thin reference lines only) within each band,
+# expressed as (ring_number, source_row) so we can locate them post-resize.
+RING_SUBLINES = {
+    "ANW": [2, 3], "ORG_IN": [4, 5], "ORG_MID": [6, 7], "ORG_OUT": [8, 9],
+}
+
+
+def redistribute_ring_bands(unwrapped):
+    """Resample the uniform 12-ring strip into the non-linear layout in
+    RING_GROUPS, giving the organ zone (ORG_IN/MID/OUT) much more height."""
+    w = unwrapped.shape[1]
+    out = np.ones((DEST_CONTENT_H, w, 3), np.uint8) * 255
+    y_dst = 0
+    for _name, s0, s1, dh in RING_GROUPS:
+        band = unwrapped[s0:s1, :]
+        band_resized = cv2.resize(band, (w, dh), interpolation=cv2.INTER_LINEAR)
+        out[y_dst:y_dst + dh, :] = band_resized
+        y_dst += dh
+    return out
+
+
 def draw_ai_grid_map_expanded(unwrapped, side="R"):
     if unwrapped is None:
-        return np.zeros((300, 1200, 3), np.uint8)
+        return np.zeros((DEST_CONTENT_H, 1200, 3), np.uint8)
     unwrapped = unwrapped.astype(np.uint8)
 
-    img_h, img_w = unwrapped.shape[:2]
-    pt, pl, pb, pr_pad = 50, 60, 40, 20
+    content = redistribute_ring_bands(unwrapped)
+    img_h, img_w = content.shape[:2]  # 600, 1200
+
+    # Alternate light tint per 5-minute sector (12 sectors = the 12 UI zones)
+    # so the AI can read "which column" visually instead of estimating a
+    # pixel offset. Kept subtle (6%) to not obscure iris texture.
+    n_sectors = 12
+    sector_w = img_w / n_sectors
+    for sec in range(n_sectors):
+        if sec % 2 == 1:
+            x0 = int(sec * sector_w)
+            x1 = int((sec + 1) * sector_w)
+            tint = np.full_like(content[:, x0:x1], (235, 235, 235))
+            content[:, x0:x1] = cv2.addWeighted(content[:, x0:x1], 0.94, tint, 0.06, 0)
+
+    pt, pl, pb, pr_pad = 70, 100, 40, 20
 
     cw = img_w + pl + pr_pad
     ch = img_h + pt + pb
 
     canvas = np.ones((ch, cw, 3), dtype=np.uint8) * 255
-    canvas[pt:pt+img_h, pl:pl+img_w] = unwrapped
+    canvas[pt:pt+img_h, pl:pl+img_w] = content
 
     c_grid = (200, 200, 200)
+    c_group = (140, 60, 0)   # bold navy-ish (BGR) for ring-group boundaries
     c_txt = (0, 0, 0)
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # minutes
+    # minutes: tick lines/numbers + sector numbers (S1..S12) above them
     for m in range(0, 61, 5):
         x = pl + int(m * (img_w / 60.0))
         if x >= pl + img_w:
@@ -333,12 +386,28 @@ def draw_ai_grid_map_expanded(unwrapped, side="R"):
         (tw, th), _ = cv2.getTextSize(txt, font, 0.4, 1)
         cv2.putText(canvas, txt, (x - tw//2, pt - 10), font, 0.4, c_txt, 1)
 
-    # rings
-    for r in range(12):
-        y = pt + int(r * (img_h / 12.0))
-        cv2.line(canvas, (pl, y), (pl+img_w, y), (240, 240, 240), 1)
-        cv2.line(canvas, (pl-5, y), (pl, y), c_txt, 1)
-        cv2.putText(canvas, f"R{r}", (5, y + 15), font, 0.5, c_txt, 1)
+    for sec in range(n_sectors):
+        x_center = pl + int((sec + 0.5) * sector_w)
+        stxt = f"S{sec+1}"
+        (tw, th), _ = cv2.getTextSize(stxt, font, 0.4, 1)
+        cv2.putText(canvas, stxt, (x_center - tw//2, pt - 30), font, 0.4, (150, 0, 0), 1)
+
+    # ring groups: bold boundary line + name label; thin sub-lines/numbers
+    # inside multi-ring bands for optional finer reference.
+    y = pt
+    for name, s0, s1, dh in RING_GROUPS:
+        cv2.line(canvas, (pl, y), (pl+img_w, y), c_group, 2)
+        cv2.putText(canvas, name, (5, y + dh//2 + 5), font, 0.45, c_txt, 1)
+        if name in RING_SUBLINES:
+            # each of these bands spans exactly 2 rings of equal source
+            # height, so the internal boundary is always the midpoint.
+            r_first, r_second = RING_SUBLINES[name]
+            yy = y + dh // 2
+            cv2.line(canvas, (pl, yy), (pl+img_w, yy), c_grid, 1)
+            cv2.putText(canvas, f"R{r_first}", (pl - 32, y + dh//4 + 4), font, 0.32, (90, 90, 90), 1)
+            cv2.putText(canvas, f"R{r_second}", (pl - 32, yy + dh//4 + 4), font, 0.32, (90, 90, 90), 1)
+        y += dh
+    cv2.line(canvas, (pl, y), (pl+img_w, y), c_group, 2)
 
     lbl = "RIGHT EYE" if side == "R" else "LEFT EYE"
     cv2.putText(canvas, lbl, (pl, ch - 10), font, 0.8, c_txt, 2)
